@@ -200,6 +200,23 @@ func TestAuthModeHotPatchChangesWire(t *testing.T) {
 	h.wire.reset()
 	observeOK(t, h, familyChatOnly, "after-patch")
 	assertOnlyRoute(t, h.wire, keyAlpha, "/provider/v1/chat/completions", familyChatOnly)
+	assertModeOnlyChange(t, filepath.Join(h.authDir, name), original, modeProvider)
+
+	// The patched mode must survive a process restart, not only the live file.
+	dir := h.dir
+	wire := h.wire
+	h.Stop()
+	wire.reset()
+	restarted, err := launchHost(t, wire, dir)
+	if err != nil {
+		t.Fatalf("restart patched host: %v", err)
+	}
+	t.Cleanup(restarted.Stop)
+	waitForAuth(t, restarted, name, modeProvider, "auth")
+	wire.reset()
+	observeOK(t, restarted, familyChatOnly, "patched-restart")
+	assertOnlyRoute(t, wire, keyAlpha, "/provider/v1/chat/completions", familyChatOnly)
+	assertModeOnlyChange(t, filepath.Join(dir, "auths", name), original, modeProvider)
 }
 
 // TestAuthModeRestartKeepsExplicitAndAdoptsDefault proves changing the plugin
@@ -225,10 +242,12 @@ func TestAuthModeRestartKeepsExplicitAndAdoptsDefault(t *testing.T) {
 	t.Cleanup(h1.Stop)
 	waitForAuth(t, h1, explicitName, modeCLI, "auth")
 	waitForAuth(t, h1, legacyName, modeCLI, "default")
-	wire.reset()
-	observeOK(t, h1, familyChatOnly, "restart-before-explicit")
-	observeOK(t, h1, familyChatOnly, "restart-before-legacy")
-	assertRoutes(t, wire, map[string]string{keyAlpha: "/alpha/generate", keyBeta: "/alpha/generate"})
+	// Listing only proves the files were parsed. Model registration is still
+	// asynchronous, so keep issuing fresh sessions until both keys are selected.
+	awaitRoutes(t, h1, "restart-before", map[string]string{
+		keyAlpha: "/alpha/generate",
+		keyBeta:  "/alpha/generate",
+	})
 	h1.Stop()
 
 	rewriteDefaultMode(t, filepath.Join(dir, "config.yaml"), modeProvider)
@@ -240,10 +259,7 @@ func TestAuthModeRestartKeepsExplicitAndAdoptsDefault(t *testing.T) {
 	t.Cleanup(h2.Stop)
 	waitForAuth(t, h2, explicitName, modeCLI, "auth")
 	waitForAuth(t, h2, legacyName, modeProvider, "default")
-	wire.reset()
-	observeOK(t, h2, familyChatOnly, "restart-after-explicit")
-	observeOK(t, h2, familyChatOnly, "restart-after-legacy")
-	assertRoutes(t, wire, map[string]string{
+	awaitRoutes(t, h2, "restart-after", map[string]string{
 		keyAlpha: "/alpha/generate",
 		keyBeta:  "/provider/v1/chat/completions",
 	})
@@ -438,24 +454,43 @@ func assertOnlyRoute(t *testing.T, wire *wireServer, key, path, native string) {
 	}
 }
 
-func assertRoutes(t *testing.T, wire *wireServer, want map[string]string) {
+// awaitRoutes issues fresh sessions until every expected key has actually been
+// selected. Each inference call is checked immediately, so a wrong mode cannot
+// be hidden by a later successful call. The bound covers asynchronous model
+// registration; it is not an unbounded retry.
+func awaitRoutes(t *testing.T, h *harness, label string, want map[string]string) {
 	t.Helper()
-	calls := inferenceCalls(wire.allCalls())
-	if len(calls) != len(want) {
-		t.Fatalf("got %d inference calls, want %d", len(calls), len(want))
-	}
-	got := map[string]string{}
-	for _, call := range calls {
-		key := upstreamKeyOf(t, call)
-		if previous, ok := got[key]; ok && previous != call.Path {
-			t.Errorf("key %s used both %s and %s", key, previous, call.Path)
+	h.wire.reset()
+	deadline := time.Now().Add(15 * time.Second)
+	seen := map[string]string{}
+	for attempt := 0; time.Now().Before(deadline) && len(seen) < len(want); attempt++ {
+		session := fmt.Sprintf("%s-%d", label, attempt)
+		before := len(inferenceCalls(h.wire.allCalls()))
+		observeOK(t, h, familyChatOnly, session)
+		calls := inferenceCalls(h.wire.allCalls())
+		if len(calls) <= before {
+			t.Fatalf("%s session %s succeeded without a new inference call", label, session)
 		}
-		got[key] = call.Path
-	}
-	for key, path := range want {
-		if got[key] != path {
-			t.Errorf("key %s path = %q, want %q (all %v)", key, got[key], path, got)
+		for _, call := range calls[before:] {
+			key := upstreamKeyOf(t, call)
+			path, ok := want[key]
+			if !ok {
+				t.Fatalf("%s selected unexpected key %q on %s", label, key, call.Path)
+			}
+			if call.Path != path {
+				t.Fatalf("%s key %s used %s, want %s", label, key, call.Path, path)
+			}
+			if previous, exists := seen[key]; exists && previous != call.Path {
+				t.Fatalf("%s key %s changed endpoint from %s to %s", label, key, previous, call.Path)
+			}
+			seen[key] = call.Path
 		}
+		if len(seen) < len(want) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("%s selected %v within 15s, want %v", label, seen, want)
 	}
 }
 
