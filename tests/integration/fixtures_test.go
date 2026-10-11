@@ -19,8 +19,18 @@ import (
 //
 // so the canonical buckets are U=3 (uncached), R=5, W=2, N=2, Q=2, T=14.
 
+// providerOnlyModel exists only in the live public catalog. It is absent from
+// the embedded CLI snapshot, so a CLI credential must never be selected for it.
+const providerOnlyModel = "synthetic/provider-only-chat"
+
+// cliOnlyModel is a reviewed CLI catalog id that the embedded public snapshot
+// does not publish. It becomes executable only through an explicit manual entry
+// and has neither a provider protocol nor a catalog endpoint.
+const cliOnlyModel = "minimax/minimax-m3-free"
+
 // providerModelsBody is the anonymous public catalogue the provider mode reads.
-// Each family declares the endpoints it really supports.
+// Each family declares the endpoints it really supports. The synthetic
+// provider-only model is deliberately outside the embedded CLI catalog.
 func providerModelsBody() []byte {
 	type model struct {
 		ID                 string   `json:"id"`
@@ -34,6 +44,7 @@ func providerModelsBody() []byte {
 			{ID: familyClaude, Object: "model", OwnedBy: "command-code", SupportedEndpoints: []string{"/messages"}},
 			{ID: familyChatResp, Object: "model", OwnedBy: "command-code", SupportedEndpoints: []string{"/chat/completions", "/responses"}},
 			{ID: familyChatOnly, Object: "model", OwnedBy: "command-code", SupportedEndpoints: []string{"/chat/completions"}},
+			{ID: providerOnlyModel, Object: "model", OwnedBy: "command-code", SupportedEndpoints: []string{"/chat/completions"}},
 		},
 	})
 	if err != nil {
