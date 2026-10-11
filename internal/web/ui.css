@@ -1,0 +1,664 @@
+/* CommandCode key and quota management UI.
+ *
+ * Visual contract: mirrors the CPA management center design tokens (warm-grey
+ * light default, pure white, dark) so a deployed plugin UI is visually
+ * consistent with its host. Tokens are named exactly like the host tokens in
+ * management-center/src/styles/themes.scss; ui.js may copy a safe whitelist of
+ * their computed values from a same-origin parent. No external fonts, no inline
+ * styles, CSP friendly (style-src 'self').
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Warm-grey light (CPA default, no data-theme attribute). */
+  --bg-secondary: #faf9f5;
+  --bg-primary: #f0eee8;
+  --bg-tertiary: #e9e6df;
+  --bg-hover: var(--bg-tertiary);
+  --text-primary: #2d2a26;
+  --text-secondary: #6d6760;
+  --text-tertiary: #a29c95;
+  --muted-bg: var(--bg-tertiary);
+  --muted-foreground: var(--text-secondary);
+  --accent-bg: var(--bg-tertiary);
+  --border-color: #e3e1db;
+  --border-primary: #d5d2cb;
+  --border-hover: #cecac4;
+
+  --primary-color: #8b8680;
+  --primary-hover: #7f7a74;
+  --primary-active: #726d67;
+  --primary-contrast: #ffffff;
+  --success-color: #10b981;
+  --warning-color: #c65746;
+  --error-color: #c65746;
+  --danger-color: var(--error-color);
+  --info-color: var(--primary-color);
+
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.08);
+  --shadow-lg: 0 10px 18px -3px rgb(0 0 0 / 0.1);
+
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", "Fira Code",
+    Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+[data-theme="white"] {
+  color-scheme: light;
+  --bg-secondary: #ffffff;
+  --bg-primary: #ffffff;
+  --bg-tertiary: #f6f6f6;
+  --border-color: #e5e5e5;
+  --border-primary: #d9d9d9;
+  --border-hover: #cccccc;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-secondary: #151412;
+  --bg-primary: #1d1b18;
+  --bg-tertiary: #262320;
+  --bg-hover: #2e2a26;
+  --text-primary: #f6f4f1;
+  --text-secondary: #c9c3bb;
+  --text-tertiary: #9c958d;
+  --border-color: #3a3530;
+  --border-primary: #4a453f;
+  --border-hover: #5a544d;
+  --primary-hover: #9a948e;
+  --primary-active: #a6a099;
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
+}
+
+/* No-JS / pre-bridge fallback: follow the system before ui.js applies a theme.
+ * Once the bridge sets [data-theme], this never overrides the host signal. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg-secondary: #151412;
+    --bg-primary: #1d1b18;
+    --bg-tertiary: #262320;
+    --bg-hover: #2e2a26;
+    --text-primary: #f6f4f1;
+    --text-secondary: #c9c3bb;
+    --text-tertiary: #9c958d;
+    --border-color: #3a3530;
+    --border-primary: #4a453f;
+    --border-hover: #5a544d;
+    --primary-hover: #9a948e;
+    --primary-active: #a6a099;
+    --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 3rem;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.5;
+  transition: background-color 300ms ease, color 300ms ease;
+}
+
+main,
+.page-header {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+/* Compact page header matching the host's dense card titles. */
+.page-header {
+  padding: 1.25rem 0 0.25rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.subtitle {
+  margin: 0.25rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  word-break: break-word;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg-tertiary);
+  padding: 0.05em 0.35em;
+  border-radius: 0.25rem;
+}
+
+.card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
+  margin: 1rem 0;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.section-head h2 {
+  margin: 0;
+}
+
+.hint {
+  margin: 0.35rem 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.field {
+  margin: 0.75rem 0;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+input[type="password"],
+input[type="text"],
+textarea {
+  width: 100%;
+  max-width: 100%;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+input[type="password"]:focus,
+input[type="text"]:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(139, 134, 128, 0.18);
+}
+
+textarea {
+  min-height: 8rem;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+/* Buttons share one base, a semantic variant, and an optional small size. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.btn-primary {
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
+  color: var(--primary-contrast);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+.btn-secondary {
+  background-color: var(--bg-tertiary);
+  border-color: var(--border-color);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  border-color: var(--border-hover);
+}
+
+.btn-ghost {
+  background-color: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-danger {
+  background-color: var(--error-color);
+  border-color: var(--error-color);
+  color: var(--primary-contrast);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--error-color) 88%, #000000);
+  border-color: color-mix(in srgb, var(--error-color) 88%, #000000);
+}
+
+.btn-sm {
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 3px;
+}
+
+.status {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-left-width: 0.25rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  font-size: 0.8125rem;
+  min-height: 1.5rem;
+  word-break: break-word;
+}
+
+.status.info {
+  border-left-color: var(--primary-color);
+}
+
+.status.ok {
+  border-left-color: var(--success-color);
+  color: var(--success-color);
+}
+
+.status.warn {
+  border-left-color: var(--warning-color);
+  color: var(--warning-color);
+}
+
+.status.error {
+  border-left-color: var(--error-color);
+  color: var(--error-color);
+}
+
+.alert {
+  margin: 0.75rem 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+}
+
+.alert-error {
+  border: 1px solid rgba(198, 87, 70, 0.4);
+  color: var(--error-color);
+  background: rgba(198, 87, 70, 0.1);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+/* Without data rows the table can shrink to the viewport instead of scrolling. */
+.table-wrap.is-empty table {
+  min-width: 0;
+}
+
+table {
+  width: 100%;
+  min-width: 46rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+}
+
+caption {
+  caption-side: top;
+  text-align: left;
+}
+
+th,
+td {
+  padding: 0.75rem 0.875rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-color);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+thead th {
+  background: var(--muted-bg);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+tbody tr:hover td {
+  background: var(--bg-tertiary);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+td.cell-name {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+td.cell-ok {
+  color: var(--success-color);
+}
+
+td.cell-warn {
+  color: var(--warning-color);
+}
+
+td.empty-cell {
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 1.25rem;
+}
+
+td.cell-actions {
+  white-space: nowrap;
+}
+
+td.cell-actions button + button {
+  margin-left: 0.4rem;
+}
+
+/* The quota table fits the viewport; only the progress column can grow. */
+.quota-table {
+  min-width: 0;
+}
+
+.quota-table th:first-child,
+.quota-table td:first-child,
+.quota-table td:nth-child(2),
+.quota-table td:nth-child(3) {
+  white-space: nowrap;
+}
+
+progress {
+  accent-color: var(--primary-color);
+}
+
+.quota-table progress {
+  width: 100%;
+  max-width: 10rem;
+  vertical-align: middle;
+}
+
+#quota-selection {
+  margin-bottom: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+/* Quota summary cards for credits */
+.quota-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.summary-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 0.625rem 0.75rem;
+}
+
+.summary-card-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.25rem;
+}
+
+.summary-card-value {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+/* Settings and runtime status grid */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.settings-item {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 0.625rem 0.75rem;
+}
+
+.settings-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.25rem;
+}
+
+.settings-value {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.risk-notice {
+  background: var(--bg-tertiary);
+  border-left: 3px solid var(--primary-color);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  margin: 0.75rem 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.notes {
+  margin: 0.5rem 0;
+  padding-left: 1.2rem;
+  font-size: 0.875rem;
+}
+
+.notes li {
+  margin: 0.3rem 0;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.75rem 0 0;
+  font-size: 0.875rem;
+}
+
+a {
+  color: var(--primary-active);
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--primary-color);
+  color: var(--primary-contrast);
+  padding: 0.45rem 0.8rem;
+  border-radius: 0 0 0.4rem 0;
+  z-index: 10;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+@media (max-width: 640px) {
+  body {
+    padding: 0 0.6rem 2.5rem;
+  }
+
+  .card {
+    padding: 1rem 0.875rem 1.125rem;
+  }
+
+  .section-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .actions {
+    gap: 0.5rem;
+  }
+
+  .actions button {
+    flex: 1 1 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body,
+  .btn,
+  input[type="password"],
+  input[type="text"],
+  textarea {
+    transition: none;
+  }
+}
+
+.model-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  /* Own the outer spacing so the .field margins (removed below) do not offset
+   * the add button against the control row. */
+  margin: 0.75rem 0;
+}
+
+.model-fields .field {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin: 0;
+}
+
+.model-fields input,
+.model-fields select {
+  width: 100%;
+  min-width: 0;
+}
+
+.model-fields select {
+  /* Match the input/button: selects do not inherit font by default. */
+  font: inherit;
+  line-height: 1.5;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+/* The manual-model draft table centers each row's text against its row action
+ * instead of the global top alignment used by the data tables. */
+.manual-model-table td {
+  vertical-align: middle;
+}

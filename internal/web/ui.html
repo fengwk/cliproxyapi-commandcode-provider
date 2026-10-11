@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>CommandCode Provider · 密钥与配额管理</title>
+<link rel="stylesheet" href="./ui.css">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="page-header">
+  <h1>CommandCode Provider</h1>
+  <p class="subtitle">CLIProxyAPI 插件 <code>cliproxyapi-commandcode-provider</code>，上游 CommandCode CLI / Provider</p>
+</header>
+<main id="main">
+  <p id="insecure-warning" class="alert alert-error" role="alert" hidden>当前页面既非 HTTPS，也不是本机地址，出于安全考虑已禁用全部密钥操作。请改用 HTTPS，或在本机（localhost / 127.0.0.1 / [::1]）打开本页面。</p>
+
+  <section class="card" aria-labelledby="auth-heading">
+    <h2 id="auth-heading">1. 管理认证</h2>
+    <p class="hint">输入 CPA 管理密钥（management key）。该密钥仅保留在当前页面的输入框中，不会写入浏览器存储、Cookie 或 URL，也不会被记录或回显。</p>
+    <form id="auth-form" autocomplete="off">
+      <div class="field">
+        <label for="mgmt-key">CPA 管理密钥</label>
+        <input id="mgmt-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="mgmt-key-hint">
+        <p id="mgmt-key-hint" class="hint">远程访问需在 CPA 中启用远程管理（remote management）；密钥错误多次可能导致当前 IP 被临时封禁，本页面不会自动重试认证。</p>
+      </div>
+      <div class="actions">
+        <button type="submit" id="refresh-btn" class="btn btn-primary">连接并刷新</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="import-heading">
+    <h2 id="import-heading">2. 导入 CommandCode 密钥</h2>
+    <p class="hint">每行一个 CommandCode 密钥。首尾空白会被去除，重复项会被忽略；最多 100 行，每行不超过 4096 字符，单次请求体不超过 64 KiB。请勿在此粘贴 CPA 管理密钥或下游 API key。</p>
+    <form id="import-form" autocomplete="off">
+      <div class="field">
+        <label for="keys">CommandCode 密钥（每行一个）</label>
+        <textarea id="keys" rows="6" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="keys-hint"></textarea>
+        <p id="keys-hint" class="hint">密钥仅随本次导入请求发送；导入完全成功后输入框会被清空，失败或部分失败时会保留内容以便修改。</p>
+      </div>
+      <div class="field">
+        <label for="label">标签（可选）</label>
+        <input id="label" name="label" type="text" maxlength="128" autocomplete="off" spellcheck="false" aria-describedby="label-hint">
+        <p id="label-hint" class="hint">用于在 CPA 中区分这批密钥，最长 128 个字符。</p>
+      </div>
+      <div class="actions">
+        <button type="submit" id="import-btn" class="btn btn-primary">导入密钥</button>
+        <span id="import-progress" class="hint" hidden>正在提交…</span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="list-heading">
+    <div class="section-head">
+      <h2 id="list-heading">3. 已托管的密钥</h2>
+      <button type="button" id="reload-btn" class="btn btn-secondary">刷新列表</button>
+    </div>
+    <p id="summary" class="hint">尚未加载。</p>
+    <p id="status" class="status" role="status" aria-live="polite">尚未加载。请输入 CPA 管理密钥并点击“连接并刷新”。</p>
+    <div class="table-wrap is-empty" id="table-wrap">
+      <table>
+        <caption class="visually-hidden">已托管密钥列表（仅显示非密信息）</caption>
+        <thead>
+          <tr>
+            <th scope="col">名称</th>
+            <th scope="col">标签</th>
+            <th scope="col">状态</th>
+            <th scope="col">禁用</th>
+            <th scope="col">可用性</th>
+            <th scope="col">成功</th>
+            <th scope="col">失败</th>
+            <th scope="col">操作</th>
+          </tr>
+        </thead>
+        <tbody id="files-body">
+          <tr><td colspan="8" class="empty-cell">暂无数据。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint">删除仅移除所选的 CommandCode 凭据文件；保存或删除后不会自动轮询，请手动刷新列表以查看最新状态。</p>
+  </section>
+
+  <section class="card" aria-labelledby="quota-heading">
+    <h2 id="quota-heading">4. 配额查看</h2>
+    <p class="hint">配额查询为只读操作，不会重置或消耗任何配额。同一订阅下的多个密钥可能共享配额，因此不同密钥查询到的结果可能相同。</p>
+    <p id="quota-status" class="status info" role="status" aria-live="polite">尚未选择密钥。请在“已托管的密钥”列表中点击某个密钥的“查看配额”。</p>
+    <div id="quota-panel" hidden>
+      <p id="quota-selection" class="hint"></p>
+      <div id="quota-summary" class="quota-summary" hidden>
+        <div class="summary-card">
+          <div class="summary-card-label">总计点数</div>
+          <div id="quota-credits-total" class="summary-card-value">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-card-label">月度点数</div>
+          <div id="quota-credits-monthly" class="summary-card-value">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-card-label">购买点数</div>
+          <div id="quota-credits-purchased" class="summary-card-value">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-card-label">免费点数</div>
+          <div id="quota-credits-free" class="summary-card-value">—</div>
+        </div>
+      </div>
+      <div class="table-wrap" id="quota-table-wrap">
+        <table class="quota-table">
+          <caption class="visually-hidden">所选密钥的速率限制窗口</caption>
+          <thead>
+            <tr>
+              <th scope="col">窗口</th>
+              <th scope="col">剩余</th>
+              <th scope="col">已用</th>
+              <th scope="col">进度</th>
+              <th scope="col">重置时间</th>
+            </tr>
+          </thead>
+          <tbody id="quota-body"></tbody>
+        </table>
+      </div>
+      <p id="quota-no-buckets" class="hint" hidden>当前账号暂无活动速率限制窗口。</p>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="settings-heading">
+    <h2 id="settings-heading">5. 运行状态与手动模型</h2>
+    <p class="hint">展示 CommandCode 运行时模式、CLI 兼容版本、基础地址、零数据保留 (ZDR) 与模型目录快照；可配置自定义手动模型。</p>
+    <div id="settings-grid" class="settings-grid">
+      <div class="settings-item">
+        <div class="settings-label">运行模式</div>
+        <div id="setting-mode" class="settings-value">CLI 模式（默认）</div>
+      </div>
+      <div class="settings-item">
+        <div class="settings-label">CLI 兼容版本</div>
+        <div id="setting-cli-version" class="settings-value">1.79.2</div>
+      </div>
+      <div class="settings-item">
+        <div class="settings-label">基础地址</div>
+        <div id="setting-base-url" class="settings-value">默认</div>
+      </div>
+      <div class="settings-item">
+        <div class="settings-label">零数据保留 (ZDR)</div>
+        <div id="setting-zdr" class="settings-value">未开启</div>
+      </div>
+      <div class="settings-item">
+        <div class="settings-label">模型目录快照</div>
+        <div id="setting-catalog" class="settings-value">87 个模型</div>
+      </div>
+    </div>
+    <p id="setting-stale" class="alert alert-error" hidden>警告：模型目录已过期（stale），系统保留最后一次可用配置。</p>
+    <p class="risk-notice">安全与权限风险提示：CLI 模式下使用标准会话与权限体系；系统不进行自动密钥轮询或产生费用的连通性调用；API 密钥与管理密钥仅保留在当前会话的输入框与请求中，绝不写入浏览器持久存储。</p>
+    <div class="model-fields">
+      <div class="field">
+        <label for="manual-model-id">模型 ID</label>
+        <input id="manual-model-id" type="text" autocomplete="off" spellcheck="false" placeholder="custom-model-id">
+      </div>
+      <div class="field">
+        <label for="manual-model-protocol">上游协议</label>
+        <select id="manual-model-protocol">
+          <option value="">自动 / 缺省（CLI Wire）</option>
+          <option value="openai">OpenAI Chat Completions</option>
+          <option value="claude">Anthropic Messages</option>
+          <option value="openai-response">OpenAI Responses</option>
+        </select>
+      </div>
+      <button id="manual-model-add" type="button" class="btn btn-secondary">添加到草稿</button>
+    </div>
+    <div class="table-wrap">
+      <table class="manual-model-table">
+        <caption class="visually-hidden">手动注册模型草稿</caption>
+        <thead><tr><th scope="col">模型 ID</th><th scope="col">上游协议</th><th scope="col">操作</th></tr></thead>
+        <tbody id="manual-model-body"><tr><td colspan="3" class="empty-cell">连接后加载。</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">最多 100 个唯一 ID，每个不超过 200 UTF-8 字节。删除只修改草稿；点击保存才写入 CPA 配置。清空并保存可取消全部手动注册。</p>
+    <div class="actions">
+      <button id="manual-model-save" type="button" class="btn btn-primary" disabled>保存手动模型</button>
+      <button id="manual-model-reload" type="button" class="btn btn-secondary">重新加载 / 放弃草稿</button>
+    </div>
+    <p id="manual-model-status" class="status info" role="status" aria-live="polite">连接后加载，或输入管理密钥再点击重新加载。</p>
+  </section>
+
+  <section class="card" aria-labelledby="about-heading">
+    <h2 id="about-heading">运行说明</h2>
+    <ul class="notes">
+      <li>凭据池化、故障转移与会话亲和由 CPA 负责；插件不实现密钥选择、冷却、重试或健康检查调度。</li>
+      <li>如需会话亲和，请在 CPA 配置中启用 <code>routing.session-affinity: true</code>。</li>
+      <li>密钥保存在 CPA 的 auth 目录（auth-dir）中，不保存在浏览器里。</li>
+      <li>请求头中的会话范围由 CPA 的会话身份与所选 auth 确定性地决定。</li>
+    </ul>
+    <p class="links">
+      <a href="https://github.com/fengwk/cliproxyapi-commandcode-provider" target="_blank" rel="noopener noreferrer">项目仓库</a>
+    </p>
+  </section>
+</main>
+<script src="./ui.js" defer></script>
+</body>
+</html>
