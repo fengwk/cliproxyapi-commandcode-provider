@@ -684,12 +684,19 @@ async function mountUi(options) {
       const resp = opts.importResponse || { status: 200, body: { imported: 1, skipped: 0, failed: 0 } };
       return { status: resp.status, ok: resp.status >= 200 && resp.status < 300, text: async () => JSON.stringify(resp.body), json: async () => resp.body };
     }
+    if (url.includes("/keys") && init.method === "PATCH") {
+      const resp = opts.patchResponse || {
+        status: 200,
+        body: { auth_index: "auth-1", mode: "provider", mode_source: "auth" }
+      };
+      return { status: resp.status, ok: resp.status >= 200 && resp.status < 300, text: async () => JSON.stringify(resp.body), json: async () => resp.body };
+    }
     if (url.includes("/credentials") && init.method === "DELETE") {
       const resp = opts.deleteResponse || { status: 200, body: { ok: true } };
       return { status: resp.status, ok: resp.status >= 200 && resp.status < 300, text: async () => JSON.stringify(resp.body), json: async () => resp.body };
     }
     // Default GET keys
-    const files = opts.files || [];
+    const files = typeof opts.filesProvider === "function" ? opts.filesProvider() : (opts.files || []);
     return { status: 200, ok: true, text: async () => JSON.stringify({ files }), json: async () => ({ files }) };
   };
 
@@ -1047,4 +1054,275 @@ test("collectThemeTokens extracts only whitelisted properties", () => {
   assert.equal(tokens["--bg-primary"], "#123456");
   assert.equal(tokens["--danger-color"], "#ff0000");
   assert.equal(tokens["--evil-secret"], undefined);
+});
+
+/* -------------------------------------------------------- per-auth mode tests */
+
+test("buildImportPayload preserves compatibility and embeds mode when specified", () => {
+  // Backward compatibility: no mode specified
+  const noMode = ui.buildImportPayload(["key-1"], "batch");
+  assert.equal(noMode.ok, true);
+  assert.deepEqual(JSON.parse(noMode.body), { keys: ["key-1"], label: "batch" });
+
+  // Explicit CLI mode
+  const cliMode = ui.buildImportPayload(["key-1"], "batch", "cli");
+  assert.equal(cliMode.ok, true);
+  assert.deepEqual(JSON.parse(cliMode.body), { keys: ["key-1"], label: "batch", mode: "cli" });
+
+  // Explicit Provider mode
+  const providerMode = ui.buildImportPayload(["key-1"], "", "provider");
+  assert.equal(providerMode.ok, true);
+  assert.deepEqual(JSON.parse(providerMode.body), { keys: ["key-1"], mode: "provider" });
+});
+
+test("normalizeFileEntries parses mode, mode_source, and flags missing or invalid mode as error", () => {
+  const rows = ui.normalizeFileEntries([
+    { name: "k1.json", auth_index: "auth-1", mode: "cli", mode_source: "auth" },
+    { name: "k2.json", auth_index: "auth-2", mode: "provider", mode_source: "default" },
+    { name: "k3.json", auth_index: "auth-3", mode: "", mode_source: "", mode_error: true },
+    { name: "k4.json", auth_index: "auth-4", mode: "invalid", mode_source: "auth" },
+    { name: "k5.json", auth_index: "auth-5" }
+  ]);
+
+  assert.equal(rows.length, 5);
+
+  // k1: explicit auth mode
+  assert.equal(rows[0].mode, "cli");
+  assert.equal(rows[0].modeSource, "auth");
+  assert.equal(rows[0].modeError, false);
+
+  // k2: default provider mode
+  assert.equal(rows[1].mode, "provider");
+  assert.equal(rows[1].modeSource, "default");
+  assert.equal(rows[1].modeError, false);
+
+  // k3: mode_error cannot default to cli
+  assert.equal(rows[2].mode, "");
+  assert.equal(rows[2].modeSource, "");
+  assert.equal(rows[2].modeError, true);
+
+  // k4: invalid mode cannot default to cli
+  assert.equal(rows[3].mode, "");
+  assert.equal(rows[3].modeSource, "");
+  assert.equal(rows[3].modeError, true);
+
+  // k5: missing mode is flagged as unreadable error
+  assert.equal(rows[4].mode, "");
+  assert.equal(rows[4].modeSource, "");
+  assert.equal(rows[4].modeError, true);
+});
+
+test("key import form sends selected mode in POST payload", async () => {
+  // Test explicit provider mode
+  const { get, requests, settle } = await mountUi({
+    importResponse: { status: 200, body: { imported: 1, skipped: 0, failed: 0 } }
+  });
+
+  get("keys").value = "test-key-1";
+  get("import-mode").value = "provider";
+  get("import-form").handlers.submit({ preventDefault() {} });
+  await settle();
+
+  const postReq = requests.find((r) => r.url.includes("/keys") && r.init.method === "POST");
+  assert.ok(postReq);
+  const body = JSON.parse(postReq.init.body);
+  assert.equal(body.mode, "provider");
+  assert.deepEqual(body.keys, ["test-key-1"]);
+});
+
+test("per-row mode editing sends strict PATCH keys body with only auth_index and mode", async () => {
+  let patchRequestBody = null;
+  const { get, requests, settle } = await mountUi({
+    files: [
+      { name: "key-a.json", auth_index: "auth-a", mode: "cli", mode_source: "default" },
+      { name: "key-b.json", auth_index: "auth-b", mode: "provider", mode_source: "auth" }
+    ],
+    patchResponse: {
+      status: 200,
+      body: { auth_index: "auth-a", mode: "provider", mode_source: "auth" }
+    },
+    filesProvider: () => [
+      { name: "key-a.json", auth_index: "auth-a", mode: "provider", mode_source: "auth" },
+      { name: "key-b.json", auth_index: "auth-b", mode: "provider", mode_source: "auth" }
+    ]
+  });
+
+  const rows = get("files-body").children;
+  assert.equal(rows.length, 2);
+
+  // Row 0 has mode select and save button
+  const row0Select = rows[0].querySelectorAll("select[data-role='mode-select']")[0];
+  const row0SaveBtn = rows[0].querySelectorAll("button[data-action='save-mode']")[0];
+  assert.ok(row0Select);
+  assert.ok(row0SaveBtn);
+  assert.equal(row0SaveBtn.className, "btn btn-secondary btn-sm");
+
+  // Switch to provider and click save
+  row0Select.value = "provider";
+  row0SaveBtn.handlers.click({ currentTarget: row0SaveBtn });
+  await settle();
+
+  const patchReq = requests.find((r) => r.url.includes("/keys") && r.init.method === "PATCH");
+  assert.ok(patchReq, "expected PATCH request");
+  patchRequestBody = JSON.parse(patchReq.init.body);
+
+  // Strict contract: only auth_index and mode, exactly 2 keys, no secret or extra fields
+  assert.deepEqual(Object.keys(patchRequestBody).sort(), ["auth_index", "mode"]);
+  assert.equal(patchRequestBody.auth_index, "auth-a");
+  assert.equal(patchRequestBody.mode, "provider");
+  assert.equal(patchReq.init.headers.Authorization, "Bearer test-mgmt-key");
+
+  // Success confirmed
+  assert.match(get("status").textContent, /已更新为 Provider 模式 并确认生效/);
+});
+
+test("save mode re-fetches keys list and confirms mode and mode_source=auth before reporting success", async () => {
+  let patched = false;
+  const { get, requests, settle } = await mountUi({
+    files: [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+    patchResponse: {
+      status: 200,
+      body: { auth_index: "auth-1", mode: "provider", mode_source: "auth" }
+    },
+    filesProvider: () => {
+      if (!patched) {
+        return [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }];
+      }
+      return [{ name: "key-1.json", auth_index: "auth-1", mode: "provider", mode_source: "auth" }];
+    }
+  });
+
+  const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+  const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+  select.value = "provider";
+  patched = true;
+  saveBtn.handlers.click({ currentTarget: saveBtn });
+  await settle();
+
+  // Must have issued a subsequent GET keys request after the PATCH
+  const patchIndex = requests.findIndex((r) => r.init.method === "PATCH");
+  const subsequentGet = requests.slice(patchIndex + 1).find((r) => r.url.includes("/keys") && r.init.method === "GET");
+  assert.ok(subsequentGet, "GET keys must be re-fetched after PATCH");
+
+  assert.match(get("status").textContent, /已更新为 Provider 模式 并确认生效/);
+  assert.equal(get("status").className, "status ok");
+});
+
+test("save mode fails and preserves list when confirmation does not match requested mode or source=auth", async () => {
+  const { get, settle } = await mountUi({
+    // Return unchanged mode_source="default" in re-fetch (server did not persist auth source)
+    files: [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+    patchResponse: { status: 200, body: { auth_index: "auth-1", mode: "provider", mode_source: "auth" } },
+    filesProvider: () => [
+      { name: "key-1.json", auth_index: "auth-1", mode: "provider", mode_source: "default" }
+    ]
+  });
+
+  const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+  const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+  select.value = "provider";
+  saveBtn.handlers.click({ currentTarget: saveBtn });
+  await settle();
+
+  // Must not treat submitted as success
+  assert.match(get("status").textContent, /未能确认生效/);
+  assert.equal(get("status").className, "status error");
+  // Existing list is preserved (not wiped out)
+  assert.equal(get("files-body").children.length, 1);
+});
+
+test("save mode handles 400 invalid mode, 401/403 auth failure, and 500 error without leaking secrets", async () => {
+  // Case 1: 400 Bad Request
+  {
+    const { get, settle } = await mountUi({
+      files: [{ name: "k.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+      patchResponse: { status: 400, body: { error: "invalid mode" } }
+    });
+    const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+    const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+    select.value = "provider";
+    saveBtn.handlers.click({ currentTarget: saveBtn });
+    await settle();
+
+    assert.match(get("status").textContent, /400/);
+    assert.equal(get("status").className, "status error");
+    assert.equal(get("files-body").children.length, 1);
+    // No leak of server raw strings
+    assert.doesNotMatch(get("status").textContent, /invalid mode/);
+  }
+
+  // Case 2: 401 Auth Failure disconnects
+  {
+    const { get, settle } = await mountUi({
+      files: [{ name: "k.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+      patchResponse: { status: 401, body: { error: "unauthorized" } }
+    });
+    const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+    const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+    select.value = "provider";
+    saveBtn.handlers.click({ currentTarget: saveBtn });
+    await settle();
+
+    assert.equal(get("mgmt-key").value, "", "mgmt key must be cleared on 401");
+    assert.match(get("status").textContent, /401/);
+  }
+
+  // Case 3: 500 CPA error
+  {
+    const { get, settle } = await mountUi({
+      files: [{ name: "k.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+      patchResponse: { status: 500, body: { error: "internal error" } }
+    });
+    const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+    const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+    select.value = "provider";
+    saveBtn.handlers.click({ currentTarget: saveBtn });
+    await settle();
+
+    assert.match(get("status").textContent, /500/);
+    assert.equal(get("files-body").children.length, 1);
+  }
+});
+
+test("invalid mode row shows error status and blocks save until explicitly chosen", async () => {
+  const { get, requests, settle } = await mountUi({
+    files: [{ name: "bad.json", auth_index: "auth-err", mode: "", mode_error: true }]
+  });
+
+  const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+  const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+  assert.ok(select);
+  assert.ok(saveBtn);
+
+  // Initial state is unselected / empty string
+  assert.equal(select.value, "");
+
+  // Attempting to save without selecting a valid mode is blocked
+  saveBtn.handlers.click({ currentTarget: saveBtn });
+  await settle();
+
+  assert.match(get("status").textContent, /请先选择有效的模式/);
+  assert.equal(get("status").className, "status error");
+
+  const patchReq = requests.find((r) => r.init.method === "PATCH");
+  assert.equal(patchReq, undefined, "no PATCH request may be sent for invalid/empty mode");
+});
+
+test("settings reflects default_mode and mode_scope=auth from contract", async () => {
+  const { get, settle } = await mountUi({
+    settingsResponse: {
+      status: 200,
+      body: {
+        mode: "cli",
+        default_mode: "provider",
+        mode_scope: "auth",
+        cli_version: "1.79.2",
+        catalog: { count: 87, source: "cli-snapshot", stale: false },
+        catalogs: { cli: { count: 87 }, provider: { count: 12 } },
+        "manual-models": []
+      }
+    }
+  });
+
+  assert.equal(get("setting-mode").textContent, "Provider 模式");
 });
