@@ -1073,6 +1073,12 @@ test("buildImportPayload preserves compatibility and embeds mode when specified"
   const providerMode = ui.buildImportPayload(["key-1"], "", "provider");
   assert.equal(providerMode.ok, true);
   assert.deepEqual(JSON.parse(providerMode.body), { keys: ["key-1"], mode: "provider" });
+
+  // Explicit invalid mode is rejected and not presumed ok
+  const invalidMode = ui.buildImportPayload(["key-1"], "batch", "invalid");
+  assert.equal(invalidMode.ok, false);
+  const spacedMode = ui.buildImportPayload(["key-1"], "batch", " cli ");
+  assert.equal(spacedMode.ok, false);
 });
 
 test("normalizeFileEntries parses mode, mode_source, and flags missing or invalid mode as error", () => {
@@ -1081,10 +1087,12 @@ test("normalizeFileEntries parses mode, mode_source, and flags missing or invali
     { name: "k2.json", auth_index: "auth-2", mode: "provider", mode_source: "default" },
     { name: "k3.json", auth_index: "auth-3", mode: "", mode_source: "", mode_error: true },
     { name: "k4.json", auth_index: "auth-4", mode: "invalid", mode_source: "auth" },
-    { name: "k5.json", auth_index: "auth-5" }
+    { name: "k5.json", auth_index: "auth-5" },
+    { name: "k6.json", auth_index: "auth-6", mode: " cli ", mode_source: "auth" },
+    { name: "k7.json", auth_index: "auth-7", mode: "cli", mode_source: "bad_source" }
   ]);
 
-  assert.equal(rows.length, 5);
+  assert.equal(rows.length, 7);
 
   // k1: explicit auth mode
   assert.equal(rows[0].mode, "cli");
@@ -1110,6 +1118,16 @@ test("normalizeFileEntries parses mode, mode_source, and flags missing or invali
   assert.equal(rows[4].mode, "");
   assert.equal(rows[4].modeSource, "");
   assert.equal(rows[4].modeError, true);
+
+  // k6: untrimmed mode ' cli ' is strictly invalid (no trim leniency)
+  assert.equal(rows[5].mode, "");
+  assert.equal(rows[5].modeSource, "");
+  assert.equal(rows[5].modeError, true);
+
+  // k7: mode_source must be auth or default; bad_source flags modeError
+  assert.equal(rows[6].mode, "");
+  assert.equal(rows[6].modeSource, "");
+  assert.equal(rows[6].modeError, true);
 });
 
 test("key import form sends selected mode in POST payload", async () => {
@@ -1325,4 +1343,111 @@ test("settings reflects default_mode and mode_scope=auth from contract", async (
   });
 
   assert.equal(get("setting-mode").textContent, "Provider 模式");
+});
+
+test("key import blocks invalid mode with zero network writes", async () => {
+  const { get, requests, settle } = await mountUi();
+
+  get("keys").value = "test-key-1";
+  get("import-mode").value = "invalid_mode";
+  get("import-form").handlers.submit({ preventDefault() {} });
+  await settle();
+
+  assert.match(get("status").textContent, /导入模式无效/);
+  assert.equal(get("status").className, "status error");
+
+  const postReq = requests.find((r) => r.url.includes("/keys") && r.init.method === "POST");
+  assert.equal(postReq, undefined, "zero POST writes when import mode is invalid");
+});
+
+test("save mode preserves existing rows and selection on empty, missing, or vanishing target in re-fetch", async () => {
+  // Scenario 1: GET re-fetch returns {} (missing files array)
+  {
+    let patched = false;
+    const { get, settle } = await mountUi({
+      files: [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+      patchResponse: { status: 200, body: { auth_index: "auth-1", mode: "provider", mode_source: "auth" } },
+      filesProvider: () => {
+        if (!patched) {
+          return [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }];
+        }
+        return undefined; // fetch returns {} with no files
+      }
+    });
+
+    const rowsBefore = get("files-body").children.length;
+    assert.equal(rowsBefore, 1);
+    const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+    const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+    select.value = "provider";
+    patched = true;
+    saveBtn.handlers.click({ currentTarget: saveBtn });
+    await settle();
+
+    assert.match(get("status").textContent, /未能确认生效/);
+    assert.equal(get("status").className, "status error");
+    // Existing rows are preserved, NOT wiped or rendered to empty-cell
+    assert.equal(get("files-body").children.length, 1);
+    assert.equal(select.value, "provider");
+  }
+
+  // Scenario 2: GET re-fetch returns { files: [] } (empty files array)
+  {
+    let patched = false;
+    const { get, settle } = await mountUi({
+      files: [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }],
+      patchResponse: { status: 200, body: { auth_index: "auth-1", mode: "provider", mode_source: "auth" } },
+      filesProvider: () => {
+        if (!patched) {
+          return [{ name: "key-1.json", auth_index: "auth-1", mode: "cli", mode_source: "default" }];
+        }
+        return []; // empty files array
+      }
+    });
+
+    const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+    const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+    select.value = "provider";
+    patched = true;
+    saveBtn.handlers.click({ currentTarget: saveBtn });
+    await settle();
+
+    assert.match(get("status").textContent, /未能确认生效/);
+    assert.equal(get("status").className, "status error");
+    // Existing row preserved, not emptied
+    assert.equal(get("files-body").children.length, 1);
+  }
+
+  // Scenario 3: GET re-fetch returns other keys but target key vanished
+  {
+    let patched = false;
+    const { get, settle } = await mountUi({
+      files: [{ name: "target.json", auth_index: "auth-target", mode: "cli", mode_source: "default" }],
+      patchResponse: { status: 200, body: { auth_index: "auth-target", mode: "provider", mode_source: "auth" } },
+      filesProvider: () => {
+        if (!patched) {
+          return [{ name: "target.json", auth_index: "auth-target", mode: "cli", mode_source: "default" }];
+        }
+        // Target disappeared from server response
+        return [{ name: "other.json", auth_index: "auth-other", mode: "provider", mode_source: "auth" }];
+      }
+    });
+
+    const saveBtn = get("files-body").querySelectorAll("button[data-action='save-mode']")[0];
+    const select = get("files-body").querySelectorAll("select[data-role='mode-select']")[0];
+    select.value = "provider";
+    patched = true;
+    saveBtn.handlers.click({ currentTarget: saveBtn });
+    await settle();
+
+    assert.match(get("status").textContent, /未能确认生效/);
+    assert.equal(get("status").className, "status error");
+    // Existing rows preserved
+    assert.equal(get("files-body").children.length, 1);
+  }
+});
+
+test("ui.html settings copy explicitly states per-credential override and default for legacy keys", () => {
+  const html = readAsset("ui.html");
+  assert.ok(html.includes("每个凭据单独配置，下面是缺少mode旧凭据的默认值"));
 });
