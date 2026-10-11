@@ -52,7 +52,7 @@ def require_identity(version, commit):
     parts = version.split(".")
     if (
         len(parts) != 3
-        or any(not part.isdigit() or (len(part) > 1 and part.startswith("0")) for part in parts)
+        or any(not part.isascii() or not part.isdigit() or (len(part) > 1 and part.startswith("0")) for part in parts)
     ):
         fail("version must be strict numeric X.Y.Z")
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):

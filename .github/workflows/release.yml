@@ -34,7 +34,50 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate release tag
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release: refusing invalid tag" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify the tagged source
+        run: |
+          go mod verify
+          make test
+          make race
+          make static
+          for script in scripts/*.sh; do bash -n "$script"; done
+
+      - name: Build pinned CPA host
+        run: bash scripts/build-cpa-host.sh "v8.0.23" "$RUNNER_TEMP/cpa/cli-proxy-api"
+
+      - name: Verify real-host integration
+        env:
+          CPA_BINARY: ${{ runner.temp }}/cpa/cli-proxy-api
+        run: make integration
+
   build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -109,6 +152,10 @@ jobs:
       # Least privilege: only this job may write repository contents.
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -126,6 +173,16 @@ jobs:
           rm -f ./*.zip.sha256
           cat checksums.txt
 
+      - name: Verify release assets
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          commit="$(git rev-parse HEAD)"
+          sdk="$(awk '$1 == "github.com/router-for-me/CLIProxyAPI/v8" { print $1 " " $2; exit }' go.mod)"
+          python3 scripts/verify-release-assets.py pkg \
+            --version "${TAG#v}" --commit "$commit" --sdk "$sdk"
+          test -s "docs/release-notes-${TAG}.md"
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -139,6 +196,6 @@ jobs:
             --verify-tag \
             --draft \
             --title "$TAG" \
-            --notes "CommandCode Provider $TAG" \
+            --notes-file "docs/release-notes-${TAG}.md" \
             pkg/*.zip pkg/checksums.txt
           gh release edit "$TAG" --draft=false

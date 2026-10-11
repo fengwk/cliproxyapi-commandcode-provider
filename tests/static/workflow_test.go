@@ -122,6 +122,13 @@ func TestReleaseIsManualAndVerified(t *testing.T) {
 		"gh release create",
 		"--verify-tag",
 		"--draft",
+		"needs: verify",
+		"Verify the tagged source",
+		"make race",
+		"make static",
+		"make integration",
+		"scripts/verify-release-assets.py pkg",
+		"--notes-file",
 		// A manual dispatch must name an existing tag and must not invent one.
 		"refusing",
 	} {

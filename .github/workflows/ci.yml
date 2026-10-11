@@ -47,6 +47,7 @@ jobs:
         run: |
           for script in scripts/*.sh; do bash -n "$script"; done
           bash scripts/test-package-plugin.sh
+          python3 tests/static/release_assets_test.py
 
       - name: Makefile smoke test
         run: make help

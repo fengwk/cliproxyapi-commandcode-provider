@@ -7,7 +7,7 @@
 - 只读配额查询（CPA 原生 `QuotaProvider`），不轮询、不写回上游。
 - 本仓库是独立插件仓库，不 fork、不修改 CPA 核心，只使用 CPA v8.0.23 的公开 SDK。
 
-> 本文档描述**已实现的插件契约**。除特别说明外，所有上游行为均以合成的本地 mock 验证，**没有对真实 CommandCode 服务做过生产验收**（见“与真实上游的验收状态”）。首版尚未发布，可先按下面的手动构建方式使用。
+> 本文档描述**已实现的插件契约**。除特别说明外，所有上游行为均以合成的本地 mock 验证，**没有对真实 CommandCode 服务做过生产验收**（见“与真实上游的验收状态”）。安装可使用插件商店或手动构建方式。
 
 ## 职责边界
 
@@ -33,7 +33,7 @@
 ### 前置条件
 
 - 支持原生插件的 CPA **v8**。首批验证基线为 **v8.0.23**；插件 SDK 精确固定在 `go.mod`（`github.com/router-for-me/CLIProxyAPI/v8 v8.0.23`）。
-- 本地构建需要 Go 1.26+、C 编译器与 `make`；CI 配置的构建目标为 linux/amd64、linux/arm64、macOS/arm64。本轮本地实际验证的平台为 linux/amd64，其他平台须以 CI 执行结果为准。
+- 本地构建需要 Go 1.26+、C 编译器与 `make`；发布流程在原生 runner 构建 linux/amd64、linux/arm64、macOS/arm64。本地实际验证的平台为 linux/amd64，其他平台的构建结果以 CI 为准。
 
 ### 1. 从自定义插件源安装（推荐）
 
@@ -199,7 +199,7 @@ make integration  # 真实宿主测试，必须设置 CPA_BINARY=/abs/path/cli-p
 - `make integration` 使用 `-tags=integration`，**要求** `CPA_BINARY` 指向真实 CPA v8 宿主二进制；缺失时**硬失败**（退出码 2），绝不静默跳过。
 - 集成矩阵：2 模式（`cli`/`provider`）× 3 客户端协议 × 3 模型家族 × 流式/非流式 = **36 cell**，并额外覆盖 header 顺序（raw TCP 抓包，不用 `httptest` 的 header map 当顺序证据）、usage/工具/reasoning、亲和与 429/402 故障转移、unsupported 语义零上游调用、ZDR 422 不降级、key 导入/重启/删除/quota、UTF-8/EOF/错误/取消/关停。
 - CI（`.github/workflows/ci.yml`）：`go vet` / `go test` / `go test -race` / Node UI 测试 / 三平台原生构建 / 真实宿主集成（`v8.0.23`，通过可复用 `real-host.yml`）。
-- 发布**仅人工**：`.github/workflows/release.yml` 由人工 `vX.Y.Z` tag 或手动 `workflow_dispatch` 触发；仓库内**没有** auto-release、自动 push、自动合并或定时改代码的工作流。发布流程先建草稿、上传全部资产后才正式发布，并使用 `gh release create --verify-tag`（从不创建 tag）。
+- 发布**仅人工**：`.github/workflows/release.yml` 由人工 `vX.Y.Z` tag 或手动 `workflow_dispatch` 触发；仓库内**没有** auto-release、自动 push、自动合并或定时改代码的工作流。发布前对准确 tag 执行 test/race/static/真实宿主集成门禁，再原生构建三平台；核验 ZIP 内容、动态库架构、metadata 版本/SDK/提交及 SHA256 后，先建草稿、上传全部资产才正式发布，并使用 `gh release create --verify-tag`（从不创建 tag）。
 
 ## 安全与许可证
 

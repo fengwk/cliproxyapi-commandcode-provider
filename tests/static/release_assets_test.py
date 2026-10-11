@@ -402,6 +402,11 @@ class ReleaseAssetsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("lowercase hex", result.stderr)
 
+    def test_unicode_digits_are_rejected(self):
+        result = self.run_verifier(version="١.٢.٣")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("X.Y.Z", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
