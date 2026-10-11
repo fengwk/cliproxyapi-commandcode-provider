@@ -119,7 +119,7 @@ func cliGenerateNDJSON(native string) []byte {
 		`{"type":"reasoning-end","id":"rs-1"}`,
 		`{"type":"text-delta","text":"hello"}`,
 		`{"type":"tool-call","toolCallId":"call_1","toolName":"get_time","input":{"tz":"UTC"}}`,
-		`{"type":"provider-metadata","cacheWriteTokens":2}`,
+		`{"type":"cache-write-tokens","cacheWriteTokens":2}`,
 		`{"type":"finish","finishReason":"tool_calls","rawFinishReason":"end_turn","totalUsage":{"inputTokens":10,"outputTokens":4,"totalTokens":14,"inputTokenDetails":{"noCacheTokens":3,"cacheReadTokens":5,"cacheWriteTokens":2},"outputTokenDetails":{"reasoningTokens":2}}}`,
 	}
 	var b strings.Builder

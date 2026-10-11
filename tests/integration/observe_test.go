@@ -254,20 +254,21 @@ func mergeStreamEvent(obs *observed, p clientProtocol, payload []byte) {
 	}
 }
 
-// chatUsageView reads an OpenAI Chat usage object.
+// chatUsageView reads an OpenAI Chat usage object. The canonical serialization
+// places cache write inside prompt_tokens_details (see the codec's chatUsage).
 func chatUsageView(usage map[string]any) usageView {
 	if usage == nil {
 		return usageView{}
 	}
-	v := usageView{
-		Input:     intAt(usage, "prompt_tokens"),
-		Output:    intAt(usage, "completion_tokens"),
-		Total:     intAt(usage, "total_tokens"),
-		Cached:    intAt(objectAt(usage, "prompt_tokens_details"), "cached_tokens"),
-		Reasoning: intAt(objectAt(usage, "completion_tokens_details"), "reasoning_tokens"),
+	details := objectAt(usage, "prompt_tokens_details")
+	return usageView{
+		Input:      intAt(usage, "prompt_tokens"),
+		Output:     intAt(usage, "completion_tokens"),
+		Total:      intAt(usage, "total_tokens"),
+		Cached:     intAt(details, "cached_tokens"),
+		CacheWrite: intAt(details, "cache_write_tokens"),
+		Reasoning:  intAt(objectAt(usage, "completion_tokens_details"), "reasoning_tokens"),
 	}
-	v.CacheWrite = intAt(usage, "cache_write_tokens")
-	return v
 }
 
 func messagesUsageView(usage map[string]any) usageView {
@@ -282,17 +283,25 @@ func messagesUsageView(usage map[string]any) usageView {
 	}
 }
 
+// responsesUsageView reads an OpenAI Responses usage object. Cache write is not
+// a standard Responses field, so it is read from either the top level or the
+// input details if a translator emits it there.
 func responsesUsageView(usage map[string]any) usageView {
 	if usage == nil {
 		return usageView{}
+	}
+	details := objectAt(usage, "input_tokens_details")
+	cacheWrite := intAt(usage, "cache_write_tokens")
+	if cacheWrite == nil {
+		cacheWrite = intAt(details, "cache_write_tokens")
 	}
 	return usageView{
 		Input:      intAt(usage, "input_tokens"),
 		Output:     intAt(usage, "output_tokens"),
 		Total:      intAt(usage, "total_tokens"),
-		Cached:     intAt(objectAt(usage, "input_tokens_details"), "cached_tokens"),
+		Cached:     intAt(details, "cached_tokens"),
 		Reasoning:  intAt(objectAt(usage, "output_tokens_details"), "reasoning_tokens"),
-		CacheWrite: intAt(usage, "cache_write_tokens"),
+		CacheWrite: cacheWrite,
 	}
 }
 

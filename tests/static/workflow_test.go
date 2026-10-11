@@ -122,6 +122,8 @@ func TestReleaseIsManualAndVerified(t *testing.T) {
 		"gh release create",
 		"--verify-tag",
 		"--draft",
+		// A manual dispatch must name an existing tag and must not invent one.
+		"refusing",
 	} {
 		if !strings.Contains(raw, needle) {
 			t.Errorf("release.yml is missing %q", needle)

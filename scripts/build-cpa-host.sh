@@ -50,12 +50,26 @@ if [[ "$selected" != "${module} ${tag}" ]]; then
 	exit 1
 fi
 
-mkdir -p "$(dirname "$out")"
-( cd "$dir" && go build -mod=readonly -o "$out" ./cmd/server )
+# Canonicalize the output path to an absolute one BEFORE cd-ing into the module
+# cache source. A relative output would otherwise be written inside the module
+# cache after the cd. Only the explicit output parent is created; the module
+# cache source tree is never modified (the build runs with -mod=readonly).
+out_parent="$(dirname "$out")"
+mkdir -p "$out_parent"
+out_abs="$(cd "$out_parent" && pwd)/$(basename "$out")"
 
-if [[ ! -x "$out" ]]; then
-	echo "build-cpa-host: build did not produce an executable at '${out}'" >&2
+case "$out_abs" in
+"${dir}"/*)
+	echo "build-cpa-host: refusing to write the binary inside the module cache source" >&2
+	exit 1
+	;;
+esac
+
+( cd "$dir" && go build -mod=readonly -o "$out_abs" ./cmd/server )
+
+if [[ ! -x "$out_abs" ]]; then
+	echo "build-cpa-host: build did not produce an executable at '${out_abs}'" >&2
 	exit 1
 fi
 
-printf 'build-cpa-host: %s@%s -> %s\n' "$module" "$tag" "$out" >&2
+printf 'build-cpa-host: %s@%s -> %s\n' "$module" "$tag" "$out_abs" >&2

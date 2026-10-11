@@ -396,9 +396,11 @@ func checkCLIGenerate(c wireRequest) []string {
 	return problems
 }
 
-// cliHeaderSequence is the pinned 1.79.2 wire order. Only entries actually sent
-// by the plugin are required; their relative order must not change.
+// cliHeaderSequence is the pinned 1.79.2 wire order (the codec's
+// commandCodeHeaderProfile). "host" and "content-length" are omitted: the host
+// transport owns them and they may be interleaved anywhere.
 var cliHeaderSequence = []string{
+	"connection",
 	"content-type",
 	"user-agent",
 	"x-command-code-version",
@@ -407,21 +409,34 @@ var cliHeaderSequence = []string{
 	"x-taste-learning",
 	"x-session-id",
 	"authorization",
+	"x-cmd-zdr",
 	"traceparent",
 	"accept",
 	"accept-language",
 	"sec-fetch-mode",
 	"accept-encoding",
-	"content-length",
 }
+
+// cliOptionalHeaders may legitimately be absent (ZDR is opt-in).
+var cliOptionalHeaders = map[string]bool{"x-cmd-zdr": true}
 
 func checkCLIHeaderOrder(c wireRequest) []string {
 	var problems []string
 	lowered := make([]string, 0, len(c.HeaderOrder))
+	seen := map[string]bool{}
 	for _, name := range c.HeaderOrder {
-		lowered = append(lowered, strings.ToLower(name))
+		lower := strings.ToLower(name)
+		lowered = append(lowered, lower)
+		seen[lower] = true
 	}
-	if !orderedSubsequence(lowered, cliHeaderSequence) {
+	required := make([]string, 0, len(cliHeaderSequence))
+	for _, name := range cliHeaderSequence {
+		if cliOptionalHeaders[name] && !seen[name] {
+			continue
+		}
+		required = append(required, name)
+	}
+	if !orderedSubsequence(lowered, required) {
 		problems = append(problems, fmt.Sprintf("raw header order does not follow the pinned profile: %v", c.HeaderOrder))
 	}
 	if got := strings.ToLower(headerValue(c, "content-type")); got != "application/json, application/json" {
