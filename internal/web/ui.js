@@ -169,7 +169,10 @@ function buildImportPayload(keys, label, mode) {
   if (typeof label === "string" && label) {
     payload.label = label;
   }
-  if (typeof mode === "string" && mode) {
+  if (mode !== undefined && mode !== null && mode !== "") {
+    if (mode !== "cli" && mode !== "provider") {
+      return { body: "", bytes: 0, ok: false };
+    }
     payload.mode = mode;
   }
   var body = JSON.stringify(payload);
@@ -412,14 +415,13 @@ function normalizeFileEntries(files) {
     }
     var rawName = typeof entry.name === "string" ? entry.name : "";
     var rawIndex = typeof entry.auth_index === "string" ? entry.auth_index : "";
-    var rawMode = typeof entry.mode === "string" ? entry.mode.trim() : "";
-    var rawModeSource = typeof entry.mode_source === "string" ? entry.mode_source.trim() : "";
-    var modeError = entry.mode_error === true || (rawMode !== "" && rawMode !== "cli" && rawMode !== "provider");
-    if (!rawMode && !modeError) {
-      modeError = true;
-    }
+    var rawMode = typeof entry.mode === "string" ? entry.mode : "";
+    var rawModeSource = typeof entry.mode_source === "string" ? entry.mode_source : "";
+    var modeValid = rawMode === "cli" || rawMode === "provider";
+    var sourceValid = rawModeSource === "auth" || rawModeSource === "default";
+    var modeError = entry.mode_error === true || !modeValid || !sourceValid;
     var mode = modeError ? "" : rawMode;
-    var modeSource = modeError ? "" : (rawModeSource === "auth" || rawModeSource === "default" ? rawModeSource : "");
+    var modeSource = modeError ? "" : rawModeSource;
 
     rows.push({
       rawName: rawName,
@@ -1184,6 +1186,10 @@ function initUi() {
     }
 
     var importMode = el.importMode && el.importMode.value ? el.importMode.value : "cli";
+    if (importMode !== "cli" && importMode !== "provider") {
+      setStatus("导入模式无效，仅支持 CLI 模式或 Provider 模式。", "error");
+      return;
+    }
     var payload = buildImportPayload(parsed.keys, labelCheck.value, importMode);
     var expectedCount = parsed.counts.valid;
     parsed.keys.length = 0;
@@ -1305,18 +1311,21 @@ function initUi() {
             if (!getPayload) {
               return;
             }
-            var rows = normalizeFileEntries(isPlainObject(getPayload) ? getPayload.files : []);
-            renderFiles(rows);
             var confirmed = false;
-            for (var i = 0; i < rows.length; i++) {
-              if (rows[i].authIndex === authIndex) {
-                if (rows[i].mode === selectedMode && rows[i].modeSource === "auth" && !rows[i].modeError) {
-                  confirmed = true;
+            var rows = null;
+            if (isPlainObject(getPayload) && Array.isArray(getPayload.files)) {
+              rows = normalizeFileEntries(getPayload.files);
+              for (var i = 0; i < rows.length; i++) {
+                if (rows[i].authIndex === authIndex) {
+                  if (rows[i].mode === selectedMode && rows[i].modeSource === "auth" && !rows[i].modeError) {
+                    confirmed = true;
+                  }
+                  break;
                 }
-                break;
               }
             }
-            if (confirmed) {
+            if (confirmed && rows) {
+              renderFiles(rows);
               setStatus("密钥模式已更新为 " + (selectedMode === "provider" ? "Provider 模式" : "CLI 模式") + " 并确认生效。", "ok");
             } else {
               setStatus("模式配置未能确认生效，请核对凭据状态或刷新列表。", "error");
