@@ -11,6 +11,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/commandcode"
 )
@@ -38,6 +40,11 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	if p.stream && p.clientResp != translator.FormatOpenAI && !translator.HasStreamResponseTransformer(p.clientResp, translator.FormatOpenAI) {
 		return unsupportedTranslation()
 	}
+	// The client request must have a converter into the CLI's Anthropic
+	// transport; a Claude body is already in the target shape.
+	if p.clientReq != translator.FormatClaude && !translator.HasRequestTransformer(p.clientReq, translator.FormatClaude) {
+		return unsupportedTranslation()
+	}
 	canonical := canonicalSessionID(req.Metadata)
 	if canonical == "" {
 		return &ProviderError{Code: "session_missing", Message: errMissingSession.Error(), HTTPStatus: http.StatusBadRequest}
@@ -62,12 +69,13 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	if errTranslate != nil {
 		return errTranslate
 	}
+	anthropic = restoreCLIControls(p.clientReq, anthropic, p.original)
 	body, errBuild := commandcode.BuildRequest(anthropic, commandcode.RequestOptions{
 		Model:           p.native,
 		ThreadID:        threadID,
 		Now:             time.Now().UTC(),
 		Capabilities:    caps,
-		ReasoningEffort: reasoningEffort(req.Metadata),
+		ReasoningEffort: reasoningEffort(req.Metadata, p.clientReq, p.original),
 	})
 	if errBuild != nil {
 		return localError(errBuild)
@@ -103,17 +111,73 @@ func unsupportedTranslation() error {
 	}
 }
 
-// reasoningEffort reads the host-resolved effort from request metadata. The CLI
+// reasoningEffort resolves the reasoning effort the host metadata declares, or
+// falls back to the validated client body's protocol-specific field. The CLI
 // builder drops any effort the model does not legitimately support.
-func reasoningEffort(metadata map[string]any) string {
-	if metadata == nil {
+func reasoningEffort(metadata map[string]any, client translator.Format, original []byte) string {
+	if metadata != nil {
+		if value, ok := metadata["reasoning_effort"].(string); ok {
+			if trimmed := bounded(strings.TrimSpace(value)); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	if len(original) == 0 || !json.Valid(original) {
 		return ""
 	}
-	value, ok := metadata["reasoning_effort"].(string)
-	if !ok {
-		return ""
+	req := gjson.ParseBytes(original)
+	var value gjson.Result
+	switch client {
+	case translator.FormatClaude:
+		value = req.Get("output_config.effort")
+	case translator.FormatOpenAIResponse:
+		value = req.Get("reasoning.effort")
+	default:
+		value = req.Get("reasoning_effort")
 	}
-	return bounded(strings.TrimSpace(value))
+	if value.Exists() && value.Type == gjson.String {
+		return bounded(strings.TrimSpace(value.String()))
+	}
+	return ""
+}
+
+// restoreCLIControls restores the generation controls the SDK openai/responses
+// → Claude transformers drop or silently default into the canonical Anthropic
+// body, using only fields the client actually sent. The SDK injects a synthetic
+// max_tokens default when the client omits one; that is deleted so the CLI
+// builder applies its own model-capped default instead of an invented value.
+func restoreCLIControls(client translator.Format, anthropic, original []byte) []byte {
+	if len(anthropic) == 0 || !json.Valid(anthropic) || len(original) == 0 || !json.Valid(original) {
+		return anthropic
+	}
+	req := gjson.ParseBytes(original)
+	out := anthropic
+	if v := req.Get("temperature"); v.Exists() && v.Type == gjson.Number {
+		if updated, err := sjson.SetBytes(out, "temperature", v.Float()); err == nil {
+			out = updated
+		}
+	}
+	var maxTokens gjson.Result
+	switch client {
+	case translator.FormatClaude:
+		maxTokens = req.Get("max_tokens")
+	case translator.FormatOpenAIResponse:
+		maxTokens = req.Get("max_output_tokens")
+	default:
+		if v := req.Get("max_completion_tokens"); v.Exists() && v.Type == gjson.Number {
+			maxTokens = v
+		} else {
+			maxTokens = req.Get("max_tokens")
+		}
+	}
+	if maxTokens.Exists() && maxTokens.Type == gjson.Number {
+		if updated, err := sjson.SetBytes(out, "max_tokens", maxTokens.Int()); err == nil {
+			out = updated
+		}
+	} else if updated, err := sjson.DeleteBytes(out, "max_tokens"); err == nil {
+		out = updated
+	}
+	return out
 }
 
 // localError maps a codec/build failure to a sanitized provider error, keeping a
@@ -207,6 +271,7 @@ type cliPump struct {
 	done          bool
 	convertFrames bool
 	emitter       cliEmitter
+	usage         usageProjector
 }
 
 // cliEmitter converts canonical OpenAI Chat frames into the client protocol.
@@ -330,6 +395,7 @@ func (m *Manager) executeCLI(p *plan, req rpcExecutorRequest) (pluginapi.Executo
 		req:      req,
 		response: commandcode.NewResponse(p.public),
 		key:      key,
+		usage:    usageProjector{source: translator.FormatOpenAI, client: p.clientResp},
 	}
 	if err := pump.drive(func([]byte) bool { return true }, false); err != nil {
 		pump.closeTurn()
@@ -354,6 +420,8 @@ func (m *Manager) executeCLI(p *plan, req rpcExecutorRequest) (pluginapi.Executo
 	if len(payload) == 0 || !json.Valid(payload) {
 		return pluginapi.ExecutorResponse{}, invalidUpstream("cli response could not be translated")
 	}
+	// Restore the usage buckets the SDK conversion models only partially.
+	payload = projectUsageJSON(p.clientResp, payload, snapshotUsage(translator.FormatOpenAI, completion))
 	return pluginapi.ExecutorResponse{Payload: payload}, nil
 }
 
@@ -379,6 +447,7 @@ func (m *Manager) streamCLI(p *plan, req rpcExecutorRequest) error {
 			original:   p.original,
 			translated: p.original,
 		},
+		usage: usageProjector{source: translator.FormatOpenAI, client: p.clientResp},
 	}
 	var pending [][]byte
 	if err := pump.drive(func(frame []byte) bool { pending = append(pending, frame); return true }, true); err != nil {
@@ -453,10 +522,24 @@ func (c *cliPump) cliFrames(frame []byte) [][]byte {
 		}
 		return [][]byte{data}
 	}
+	// Remember the canonical usage so the SDK-produced terminal frame can be
+	// corrected with buckets its conversion drops.
+	c.usage.observe(data)
 	line := make([]byte, 0, len(data)+len("data: "))
 	line = append(line, "data: "...)
 	line = append(line, data...)
-	return translator.TranslateStream(context.Background(), translator.FormatOpenAI, c.emitter.clientResp, c.emitter.model, c.emitter.original, c.emitter.translated, line, &c.emitter.param)
+	frames := translator.TranslateStream(context.Background(), translator.FormatOpenAI, c.emitter.clientResp, c.emitter.model, c.emitter.original, c.emitter.translated, line, &c.emitter.param)
+	if len(frames) == 0 {
+		return nil
+	}
+	out := make([][]byte, 0, len(frames))
+	for _, clientFrame := range frames {
+		if len(clientFrame) == 0 {
+			continue
+		}
+		out = append(out, c.usage.project(clientFrame))
+	}
+	return out
 }
 
 // parseCanonicalFrame reassembles one complete SSE frame produced by the codec

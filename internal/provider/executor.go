@@ -129,14 +129,21 @@ func (p *plan) prepareProvider(req rpcExecutorRequest) error {
 	if !ok {
 		return &ProviderError{Code: "unsupported_protocol", Message: "unsupported upstream protocol", HTTPStatus: http.StatusBadRequest}
 	}
-	body, errBody := buildProviderBody(req, p.clientReq, target, p.native, p.stream)
+	body := req.Payload
+	if len(body) == 0 {
+		body = req.OriginalRequest
+	}
+	if errSemantics := rejectProviderSemantics(p.clientReq, body); errSemantics != nil {
+		return errSemantics
+	}
+	converted, errBody := buildProviderBody(req, p.clientReq, target, p.native, p.stream)
 	if errBody != nil {
 		return errBody
 	}
 	p.wire = target
 	p.sdk = sdkFormatFor(target)
 	p.endpoint = endpoint
-	p.translated = body
+	p.translated = converted
 	return nil
 }
 
@@ -155,21 +162,156 @@ func buildProviderBody(req rpcExecutorRequest, client, target translator.Format,
 	out := body
 	if client != target {
 		out = translator.TranslateRequest(client, sdkFormatFor(target), native, body, stream)
-	} else if target == translator.FormatOpenAIResponse {
-		// Native Responses passthrough still needs the ordinary generation
-		// controls the SDK leaves in place.
-		out = enforceStream(out, stream)
 	}
 	if client != target && target == translator.FormatOpenAIResponse {
 		out = applyResponsesControls(out, body)
-		out = enforceStream(out, stream)
 	}
-	if json.Valid(out) && gjson.GetBytes(out, "model").Exists() {
-		if updated, err := sjson.SetBytes(out, "model", native); err == nil {
-			out = updated
+	if !json.Valid(out) {
+		return nil, &ProviderError{Code: "invalid_request", Message: "request body could not be converted", HTTPStatus: http.StatusBadRequest}
+	}
+	// Every native and cross-protocol body carries the native model and the
+	// stream flag that matches the actual execution mode.
+	if updated, err := sjson.SetBytes(out, "model", native); err == nil {
+		out = updated
+	}
+	out = enforceStream(out, stream)
+	return out, nil
+}
+
+// rejectProviderSemantics fails a /provider/v1 request that carries semantics
+// the transport cannot relay faithfully. It is a targeted denylist, not the
+// CLI wire allowlist: ordinary fields a native upstream can honour (for example
+// temperature, top_p, store or metadata) are never restricted here.
+func rejectProviderSemantics(client translator.Format, body []byte) error {
+	if len(body) == 0 || !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+		return nil
+	}
+	root := gjson.ParseBytes(body)
+	switch client {
+	case translator.FormatClaude:
+		if hasRemoteClaudeImage(root.Get("messages")) {
+			return providerUnsupported("remote image urls cannot be relayed faithfully")
+		}
+	case translator.FormatOpenAIResponse:
+		if v := root.Get("previous_response_id"); v.Exists() && v.Type != gjson.Null && strings.TrimSpace(v.String()) != "" {
+			return providerUnsupported("previous_response_id cannot be converted between protocols")
+		}
+		if hasBuiltinTool(root.Get("tools")) {
+			return providerUnsupported("only function tools are supported")
+		}
+		if hasRemoteResponsesImage(root.Get("input")) {
+			return providerUnsupported("remote image urls cannot be relayed faithfully")
+		}
+	default:
+		if v := root.Get("n"); v.Exists() && v.Type != gjson.Null {
+			if v.Type != gjson.Number || v.Int() != 1 {
+				return providerUnsupported("only n=1 is supported")
+			}
+		}
+		if hasBuiltinTool(root.Get("tools")) {
+			return providerUnsupported("only function tools are supported")
+		}
+		if hasRemoteChatImage(root.Get("messages")) {
+			return providerUnsupported("remote image urls cannot be relayed faithfully")
 		}
 	}
-	return out, nil
+	return nil
+}
+
+func providerUnsupported(message string) error {
+	return &ProviderError{Code: "unsupported_semantics", Message: message, HTTPStatus: http.StatusBadRequest}
+}
+
+func isRemoteURL(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
+}
+
+// hasBuiltinTool reports whether any tool declares a non-function (builtin)
+// type, which the function-tool wire cannot express.
+func hasBuiltinTool(tools gjson.Result) bool {
+	if !tools.IsArray() {
+		return false
+	}
+	builtin := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		typ := tool.Get("type")
+		if typ.Exists() && typ.Type != gjson.Null && typ.String() != "" && typ.String() != "function" {
+			builtin = true
+			return false
+		}
+		return true
+	})
+	return builtin
+}
+
+func hasRemoteChatImage(messages gjson.Result) bool {
+	if !messages.IsArray() {
+		return false
+	}
+	found := false
+	messages.ForEach(func(_, message gjson.Result) bool {
+		message.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "image_url" {
+				return true
+			}
+			if isRemoteURL(part.Get("image_url.url").String()) || isRemoteURL(part.Get("image_url").String()) {
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	return found
+}
+
+func hasRemoteResponsesImage(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+	found := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "input_image" && isRemoteURL(item.Get("image_url").String()) {
+			found = true
+			return false
+		}
+		item.Get("content").ForEach(func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "input_image":
+				if isRemoteURL(part.Get("image_url").String()) {
+					found = true
+					return false
+				}
+			case "image_url":
+				if isRemoteURL(part.Get("image_url.url").String()) || isRemoteURL(part.Get("image_url").String()) {
+					found = true
+					return false
+				}
+			}
+			return true
+		})
+		return !found
+	})
+	return found
+}
+
+func hasRemoteClaudeImage(messages gjson.Result) bool {
+	if !messages.IsArray() {
+		return false
+	}
+	found := false
+	messages.ForEach(func(_, message gjson.Result) bool {
+		message.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "image" && part.Get("source.type").String() == "url" {
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	return found
 }
 
 // responsesControlCopy is the raw field mapping that restores the ordinary
@@ -302,6 +444,8 @@ func (m *Manager) executeProvider(p *plan, req rpcExecutorRequest) (pluginapi.Ex
 	if len(payload) == 0 || !json.Valid(payload) {
 		return pluginapi.ExecutorResponse{}, invalidUpstream("upstream response could not be translated")
 	}
+	// Restore the usage buckets the SDK conversion models only partially.
+	payload = projectUsageJSON(p.clientResp, payload, snapshotUsage(p.wire, resp.Body))
 	return pluginapi.ExecutorResponse{Payload: payload, Headers: sanitizeResponseHeaders(resp.Headers)}, nil
 }
 
@@ -339,7 +483,7 @@ func (m *Manager) streamProvider(p *plan, req rpcExecutorRequest) error {
 		return unavailable()
 	}
 
-	pump := &providerPump{plan: p, req: req}
+	pump := &providerPump{plan: p, req: req, usage: usageProjector{source: p.wire, client: p.clientResp}}
 	var pending [][]byte
 	if err := m.preflightProvider(pump, start.StreamID, &pending); err != nil {
 		m.bridge.HTTPStreamClose(start.StreamID)
@@ -378,13 +522,20 @@ func (m *Manager) openStream(key uint64, run chan struct{}, callbackID, method, 
 // providerPump converts an arbitrary sequence of upstream SSE reads into
 // client-protocol frames and tracks terminal/error signals.
 type providerPump struct {
-	plan      *plan
-	req       rpcExecutorRequest
-	framer    sseEventFramer
-	param     any
-	done      bool // saw a terminal signal
-	malformed bool
-	sawError  bool
+	plan   *plan
+	req    rpcExecutorRequest
+	framer sseEventFramer
+	param  any
+	usage  usageProjector
+	// done means the stream reached its protocol end (a chat [DONE] sentinel or
+	// a proven terminal observed at EOF). terminalSeen records a proven
+	// terminal independently so a chat stream keeps draining its trailing usage
+	// frame and, only when a terminal was really proven, an EOF can be turned
+	// into the equivalent [DONE] the SDK needs to flush.
+	done         bool
+	terminalSeen bool
+	malformed    bool
+	sawError     bool
 }
 
 // process feeds one upstream read. It invokes sink once per client frame; a false
@@ -430,7 +581,9 @@ func (p *providerPump) handle(event sseEvent, sink func([]byte) bool) bool {
 				p.done = true
 				return true
 			case signalTerminal:
-				p.done = true
+				// A chat finish_reason is not the end of the stream: the trailing
+				// usage frame and [DONE] still follow. Only mark it seen.
+				p.terminalSeen = true
 			}
 			return sink(event.Data)
 		}
@@ -450,6 +603,9 @@ func (p *providerPump) handle(event sseEvent, sink func([]byte) bool) bool {
 	if len(event.Data) == 0 {
 		return true
 	}
+	// Keep the authoritative native picture so the SDK-produced terminal frame
+	// can be corrected with buckets the conversion drops.
+	p.usage.observe(event.Data)
 	switch signal, malformed := classifyNativeEvent(native, event.Data); signal {
 	case signalError:
 		if malformed {
@@ -461,13 +617,21 @@ func (p *providerPump) handle(event sseEvent, sink func([]byte) bool) bool {
 	case signalDone:
 		p.done = true
 	case signalTerminal:
-		p.done = true
+		// A chat finish_reason is followed by the trailing usage frame and
+		// [DONE], so keep draining. A Claude message_stop or a Responses
+		// response.completed is the definitive end and stays immediate.
+		if native == translator.FormatOpenAI {
+			p.terminalSeen = true
+		} else {
+			p.done = true
+		}
 	}
 	return p.translate(event.Data, sink)
 }
 
 // translate feeds one native data payload to the SDK stream translator and
-// forwards every resulting client frame.
+// forwards every resulting client frame, correcting the terminal frame's usage
+// with the authoritative native snapshot before it is emitted.
 func (p *providerPump) translate(data []byte, sink func([]byte) bool) bool {
 	line := make([]byte, 0, len(data)+len("data: "))
 	line = append(line, "data: "...)
@@ -477,16 +641,35 @@ func (p *providerPump) translate(data []byte, sink func([]byte) bool) bool {
 		if len(frame) == 0 {
 			continue
 		}
-		if !sink(frame) {
+		if !sink(p.usage.project(frame)) {
 			return false
 		}
 	}
 	return true
 }
 
+// finishEOF resolves an upstream EOF. A proven terminal makes the end a clean
+// success; a chat source additionally needs an explicit [DONE] flush so the SDK
+// emits its terminal frame when the upstream omitted the sentinel. The flush is
+// only produced for a genuinely proven terminal, never to manufacture success.
+func (p *providerPump) finishEOF(sink func([]byte) bool) error {
+	if p.done {
+		return nil
+	}
+	if p.terminalSeen {
+		if p.plan.wire == translator.FormatOpenAI && p.plan.clientResp != translator.FormatOpenAI {
+			p.translate([]byte("[DONE]"), sink)
+		}
+		p.done = true
+		return nil
+	}
+	return p.framer.finish()
+}
+
 // preflightProvider reads until the first client frame, terminal signal or
 // error so a first-frame failure is reported as a failed RPC rather than an
-// empty successful stream.
+// empty successful stream. An upstream that closes before producing any frame
+// or valid terminal fails synchronously.
 func (m *Manager) preflightProvider(pump *providerPump, upstreamID string, pending *[][]byte) error {
 	sink := func(frame []byte) bool {
 		*pending = append(*pending, frame)
@@ -508,8 +691,17 @@ func (m *Manager) preflightProvider(pump *providerPump, upstreamID string, pendi
 				return err
 			}
 		}
-		if len(*pending) > 0 || pump.done || pump.malformed || pump.sawError || chunk.Done {
+		if len(*pending) > 0 || pump.done || pump.malformed || pump.sawError {
 			return nil
+		}
+		if chunk.Done {
+			if err := pump.finishEOF(sink); err != nil {
+				return &ProviderError{Code: "upstream_stream_invalid", Message: "upstream stream ended before completion", HTTPStatus: http.StatusBadGateway}
+			}
+			if len(*pending) > 0 || pump.done {
+				return nil
+			}
+			return &ProviderError{Code: "upstream_stream_truncated", Message: "upstream stream ended before completion", HTTPStatus: http.StatusBadGateway}
 		}
 	}
 }
@@ -598,11 +790,14 @@ func (m *Manager) runProviderPump(pump *providerPump, key uint64, upstreamID, do
 		}
 	}
 	if pump.done {
-		// A terminal signal was observed; a trailing partial line is irrelevant.
 		return
 	}
-	if errFinish := pump.framer.finish(); errFinish != nil {
+	if errFinish := pump.finishEOF(emit); errFinish != nil {
 		closeDown("truncated upstream stream")
+		return
+	}
+	if pump.done {
+		// A proven terminal resolved the EOF; the flush (if any) already ran.
 		return
 	}
 	closeDown("upstream stream ended before completion")

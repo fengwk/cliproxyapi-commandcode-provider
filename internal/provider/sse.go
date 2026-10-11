@@ -10,6 +10,10 @@ import (
 // cannot exhaust plugin memory.
 const maxSSEEventBytes = 8 << 20
 
+// maxSSEStreamBytes bounds the total decoded bytes of one upstream stream so a
+// hostile upstream cannot stream unbounded data through the plugin.
+const maxSSEStreamBytes = 64 << 20
+
 // errEmitStopped reports that the downstream consumer asked to stop; it is not
 // an upstream framing failure.
 var errEmitStopped = errors.New("sse emit stopped")
@@ -34,11 +38,12 @@ type sseEvent struct {
 // payloads split at any byte boundary, and joins multiple consecutive data lines
 // of one event with "\n" per the SSE specification.
 type sseEventFramer struct {
-	buf  []byte
-	data [][]byte
-	size int
-	raw  []byte
-	any  bool
+	buf   []byte
+	data  [][]byte
+	size  int
+	raw   []byte
+	any   bool
+	total int
 }
 
 // push feeds raw upstream bytes. It invokes emit once per dispatched event. It
@@ -47,6 +52,10 @@ type sseEventFramer struct {
 func (f *sseEventFramer) push(chunk []byte, emit func(sseEvent) bool) error {
 	if len(chunk) == 0 {
 		return nil
+	}
+	f.total += len(chunk)
+	if f.total > maxSSEStreamBytes {
+		return errSSEMalformed
 	}
 	f.buf = append(f.buf, chunk...)
 	for {

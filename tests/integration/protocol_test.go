@@ -135,6 +135,18 @@ func assertUpstreamRoute(t *testing.T, mode, family string, client clientProtoco
 }
 
 func upstreamModel(call wireRequest) string {
+	// The CLI generate transport nests the request under "params"; every
+	// provider endpoint carries the model at the document root. Reading only the
+	// root model made every CLI cell look like an empty model.
+	if call.Path == "/alpha/generate" {
+		var decoded struct {
+			Params struct {
+				Model string `json:"model"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal(call.Body, &decoded)
+		return decoded.Params.Model
+	}
 	var decoded struct {
 		Model string `json:"model"`
 	}
