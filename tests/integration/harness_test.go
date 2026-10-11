@@ -322,11 +322,13 @@ func startHost(t *testing.T, wire *wireServer, mode string, zdr bool, dir string
 	return h, nil
 }
 
-// installPlugin copies the shared build artifact into a per-test plugin store.
+// installPlugin uses the versioned filename produced by the host plugin store.
 func installPlugin(pluginsDir string) error {
 	name := pluginLibName()
 	src := filepath.Join(pluginBuildRoot, runtime.GOOS, runtime.GOARCH, name)
-	dst := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, name)
+	extension := filepath.Ext(name)
+	installedName := strings.TrimSuffix(name, extension) + "-v0.1.0" + extension
+	dst := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, installedName)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("create plugin dir: %w", err)
 	}
@@ -341,8 +343,7 @@ func installPlugin(pluginsDir string) error {
 }
 
 // hostConfig renders an isolated v8 config with fake credentials only. The
-// plugin base-url is the authority of the raw-TCP mock; the plugin appends the
-// versioned path itself.
+// plugin base-url is the raw-TCP mock authority; store is the host-owned manifest.
 func hostConfig(port int, authDir, pluginsDir, upstreamAuthority, mode string, zdr bool) []byte {
 	return []byte(fmt.Sprintf(`config-version: 8
 server:
@@ -375,6 +376,16 @@ plugins:
       mode: %q
       base-url: %q
       zdr: %t
+      store:
+        id: cliproxyapi-commandcode-provider
+        name: CommandCode Provider
+        version: 0.1.0
+        release-tag: v0.1.0
+        repository: https://github.com/fengwk/cliproxyapi-commandcode-provider
+        source-id: synthetic-store
+        source-url: http://127.0.0.1/registry.json
+        install:
+          type: github-release
 `, port, mgmtKey, clientKey, authDir, pluginsDir, pluginID, mode, upstreamAuthority, zdr))
 }
 

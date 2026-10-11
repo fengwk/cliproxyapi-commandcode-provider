@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -128,5 +129,31 @@ func TestHandleCallRegisterListsCLIModels(t *testing.T) {
 	env := decodeEnvelope(t, raw)
 	if !env.OK {
 		t.Fatalf("model.static must succeed: %+v", env.Error)
+	}
+}
+
+func TestLifecycleAcceptsStoreManifest(t *testing.T) {
+	// Both initial registration and later reconfiguration carry the host manifest.
+	m := (&fakeHost{}).manager()
+	defer m.shutdown()
+	request, err := json.Marshal(map[string]any{
+		"schema_version": pluginabi.SchemaVersion,
+		"config_yaml": []byte("enabled: true\npriority: 0\nmode: cli\nstore:\n  id: " + PluginID +
+			"\n  version: 0.1.0\n  install:\n    type: github-release\n"),
+	})
+	if err != nil {
+		t.Fatalf("encode lifecycle request: %v", err)
+	}
+	for _, method := range []string{pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure} {
+		raw, err := m.HandleCall(method, request)
+		if err != nil {
+			t.Fatalf("%s transport error: %v", method, err)
+		}
+		if env := decodeEnvelope(t, raw); !env.OK {
+			t.Fatalf("%s must accept the store manifest: %+v", method, env.Error)
+		}
+		if cfg := m.config(); cfg.Mode != ModeCLI || cfg.BaseURL != DefaultBaseURL {
+			t.Fatalf("%s did not apply plugin settings: %+v", method, cfg)
+		}
 	}
 }

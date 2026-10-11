@@ -143,6 +143,39 @@ func TestParseConfigAllowsHostReservedFields(t *testing.T) {
 	}
 }
 
+func TestParseConfigAllowsStoreManifest(t *testing.T) {
+	// The store manifest belongs to CPA, including future nested metadata.
+	manifest := `store:
+  schema-version: 2
+  id: cliproxyapi-commandcode-provider
+  version: 0.1.0
+  release-tag: v0.1.0
+  repository: https://github.com/fengwk/cliproxyapi-commandcode-provider
+  install:
+    type: github-release
+  future-metadata:
+    mode: auto
+    base-url: http://remote.invalid
+`
+	for _, mode := range []Mode{ModeCLI, ModeProvider} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg, err := parseConfig([]byte("enabled: true\npriority: 0\nmode: " + string(mode) + "\n" + manifest))
+			if err != nil {
+				t.Fatalf("host store metadata must not prevent config parsing: %v", err)
+			}
+			if cfg.Mode != mode || cfg.BaseURL != DefaultBaseURL || cfg.ZDR {
+				t.Fatalf("store metadata must not affect plugin settings: %+v", cfg)
+			}
+		})
+	}
+	// Ignoring store does not permit unknown root keys or business field typos.
+	for _, extra := range []string{"version: 0.1.0\n", "mdoe: provider\n", "bogus: private-value\n", "---\nmode: provider\n"} {
+		if _, err := parseConfig([]byte(manifest + extra)); err == nil || strings.Contains(err.Error(), "private-value") {
+			t.Fatalf("invalid config must still fail closed without echoing data: %v", err)
+		}
+	}
+}
+
 func TestParseConfigWhitelistBoundsAndDedupe(t *testing.T) {
 	if _, err := parseConfig([]byte("models:\n  - a\n  - a\n")); err == nil {
 		t.Fatalf("duplicate whitelist entries must be rejected")

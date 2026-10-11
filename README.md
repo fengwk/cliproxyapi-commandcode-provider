@@ -81,8 +81,15 @@ plugins:
 - **`zdr`** 默认 `false`（与原 CLI 一致）；`true` 时发送 `x-cmd-zdr: 1`，遇到 `422 cmd_zdr_no_providers` 原样上报，**不会撤掉 ZDR 再重试**。
 - **`models`** 只是白名单，不新增目录外模型。
 - **`manual-models`** 用于显式注册/覆盖模型：`{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}`，provider 模式必须声明受支持 endpoint（`openai`/`claude`/`openai-response`），上限 100 条、每条 id ≤ 200 字节。
+- **宿主保留字段**：`enabled`、`priority` 和商店写入的 `store` 由 CPA 管理；插件接受但不把它们作为业务配置。`store` 内的版本、安装来源及其他元数据不影响传输模式或上游地址；其他未知顶层字段仍严格拒绝。
 
 模式是**显式**的：插件不会因为 `403 upgrade_required` 或任何错误自动在 `cli` 与 `provider` 之间切换，也不会自动回退到某个固定模型列表。
+
+### 商店安装后显示“未注册”
+
+v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.register` / `plugin.reconfigure` 返回 `invalid config yaml`；全局和实例开关开启也无法解决。这同时会导致插件名称、可视化配置字段和管理菜单缺失。
+
+修复版本发布前的临时办法：先备份 CPA 配置，仅移除 `plugins.configs.cliproxyapi-commandcode-provider.store` 元数据块，保留该插件的其他配置与 `enabled: true`，保存后等待 CPA 配置重载并刷新插件列表。移除元数据会影响商店来源和版本追踪，之后应通过商店安装修复版本，让 CPA 重建对应新版本的 `store`；不要原样恢复旧版本元数据，也不要删除凭据或其他插件配置。反复安装同一个 v0.1.0 会再次写入该字段，不能解决问题。
 
 ## 导入 CommandCode 密钥
 

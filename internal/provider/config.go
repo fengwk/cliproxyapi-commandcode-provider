@@ -74,9 +74,8 @@ type Config struct {
 }
 
 // rawConfig mirrors the flattened plugin config YAML. Decoding rejects unknown
-// keys so a misspelled mode or field fails closed instead of being ignored. The
-// host-owned enabled/priority fields are the only extra keys accepted, because
-// the host injects them into every plugin config payload.
+// keys so a misspelled mode or field fails closed instead of being ignored.
+// Host-owned lifecycle fields and the opaque store manifest are ignored.
 type rawConfig struct {
 	Mode         string        `yaml:"mode"`
 	BaseURL      string        `yaml:"base-url"`
@@ -84,9 +83,10 @@ type rawConfig struct {
 	Models       []string      `yaml:"models"`
 	ManualModels []ManualModel `yaml:"manual-models"`
 
-	// Enabled and Priority are reserved host-owned fields: accepted and ignored.
-	Enabled  *bool `yaml:"enabled"`
-	Priority *int  `yaml:"priority"`
+	// CPA owns these fields; store metadata is not plugin runtime configuration.
+	Enabled  *bool     `yaml:"enabled"`
+	Priority *int      `yaml:"priority"`
+	Store    yaml.Node `yaml:"store"`
 }
 
 // parseConfig decodes and validates the lifecycle config payload. An empty
