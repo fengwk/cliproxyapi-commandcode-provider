@@ -1,0 +1,614 @@
+package provider
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+
+	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/catalogdata"
+)
+
+// cliModel is one reviewed CLI 1.79.2 catalog entry. Every capability field is
+// optional because the source catalog omits unknown facts rather than encoding
+// a default.
+type cliModel struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	InputModalities  []string `json:"inputModalities"`
+	ReasoningEfforts []string `json:"reasoningEfforts"`
+	ContextWindow    int64    `json:"contextWindow"`
+	MaxOutputTokens  int64    `json:"maxOutputTokens"`
+	Reasoning        *bool    `json:"reasoning"`
+}
+
+// publicModel is one public GET /provider/v1/models entry. Data is a pointer so
+// a missing or null "data" field is distinguishable from an explicit empty list.
+type publicModel struct {
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Created            int64    `json:"created"`
+	OwnedBy            string   `json:"owned_by"`
+	ContextLength      int64    `json:"context_length"`
+	SupportedEndpoints []string `json:"supported_endpoints"`
+}
+
+type publicCatalog struct {
+	Data *[]publicModel `json:"data"`
+}
+
+type cliCatalog struct {
+	Models []cliModel `json:"models"`
+}
+
+// catalogIndex is the parsed, reviewed compatibility snapshot embedded at build
+// time: the CLI facts and the public provider catalog bound to one CLI version.
+type catalogIndex struct {
+	cli         map[string]cliModel
+	cliOrder    []string
+	public      map[string]publicModel
+	publicOrder []string
+}
+
+var (
+	embeddedOnce  sync.Once
+	embeddedCache catalogIndex
+)
+
+// loadEmbeddedIndex parses the embedded reviewed snapshot exactly once. A
+// malformed embedded bundle yields an empty index; the catalog is then simply
+// absent rather than invented.
+func loadEmbeddedIndex() catalogIndex {
+	embeddedOnce.Do(func() {
+		index := catalogIndex{cli: map[string]cliModel{}, public: map[string]publicModel{}}
+		var cli cliCatalog
+		if err := json.Unmarshal(catalogdata.CLIJSON, &cli); err == nil {
+			for _, model := range cli.Models {
+				id := nativeModelID(model.ID)
+				if id == "" {
+					continue
+				}
+				if _, ok := index.cli[id]; ok {
+					continue
+				}
+				index.cli[id] = model
+				index.cliOrder = append(index.cliOrder, id)
+			}
+		}
+		var public publicCatalog
+		if err := json.Unmarshal(catalogdata.ProviderJSON, &public); err == nil && public.Data != nil {
+			for _, model := range *public.Data {
+				id := nativeModelID(model.ID)
+				if id == "" {
+					continue
+				}
+				if _, ok := index.public[id]; ok {
+					continue
+				}
+				index.public[id] = model
+				index.publicOrder = append(index.publicOrder, id)
+			}
+		}
+		embeddedCache = index
+	})
+	return embeddedCache
+}
+
+// catalogCLIVersion is the reviewed CLI compatibility revision bound to the
+// embedded snapshot. It is read-only and never overridden by a freshly seen
+// upstream version.
+func catalogCLIVersion() string {
+	return catalogdata.CLIVersion
+}
+
+// nativeModelID strips the fixed public namespace from a requested model id.
+func nativeModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasPrefix(model, modelPrefix) {
+		return strings.TrimPrefix(model, modelPrefix)
+	}
+	return model
+}
+
+// modelFacts is the union of reviewed CLI metadata and live public catalog
+// facts for one native model. Unknown fields stay zero/absent.
+type modelFacts struct {
+	native        string
+	name          string
+	created       int64
+	contextWindow int64
+	maxOutput     int64
+	modalities    []string
+	efforts       []string
+	reasoning     bool
+	reasoningSeen bool
+	endpoints     []string
+	userDefined   bool
+}
+
+// factsFromCLI builds facts from a reviewed CLI entry.
+func factsFromCLI(model cliModel) modelFacts {
+	facts := modelFacts{
+		native:        nativeModelID(model.ID),
+		name:          model.Name,
+		contextWindow: model.ContextWindow,
+		maxOutput:     model.MaxOutputTokens,
+		modalities:    model.InputModalities,
+		efforts:       model.ReasoningEfforts,
+	}
+	if model.Reasoning != nil {
+		facts.reasoningSeen = true
+		facts.reasoning = *model.Reasoning
+	}
+	return facts
+}
+
+// mergePublic supplements facts with live public catalog values. Endpoints and
+// created always come from the public entry; context/modalities/reasoning are
+// only filled when the public entry leaves them unknown.
+func (f modelFacts) mergePublic(model publicModel, haveCLI bool) modelFacts {
+	f.created = model.Created
+	f.endpoints = model.SupportedEndpoints
+	if name := strings.TrimSpace(model.Name); name != "" {
+		f.name = name
+	}
+	if !haveCLI || f.contextWindow == 0 {
+		if model.ContextLength > 0 {
+			f.contextWindow = model.ContextLength
+		}
+	}
+	return f
+}
+
+// applyManual overlays explicit manual-model metadata, then marks the model
+// user-defined. Only supplied fields override discovered facts.
+func (f modelFacts) applyManual(manual ManualModel) modelFacts {
+	f.userDefined = true
+	if manual.ContextWindow > 0 {
+		f.contextWindow = manual.ContextWindow
+	}
+	if manual.MaxOutputTokens > 0 {
+		f.maxOutput = manual.MaxOutputTokens
+	}
+	if len(manual.InputModalities) > 0 {
+		f.modalities = manual.InputModalities
+	}
+	if len(manual.ReasoningEfforts) > 0 {
+		f.efforts = manual.ReasoningEfforts
+		f.reasoningSeen = true
+		f.reasoning = true
+	}
+	if strings.TrimSpace(manual.Protocol) != "" {
+		if format, err := parseProtocol(manual.Protocol); err == nil {
+			if endpoint := endpointForFormat(format); endpoint != "" {
+				f.endpoints = []string{endpoint}
+			}
+		}
+	}
+	return f
+}
+
+// visionEnabled reports whether a model accepts inline images.
+func (f modelFacts) visionEnabled() bool {
+	for _, modality := range f.modalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+// thinkingSupport publishes only the reasoning facts that were actually
+// observed. It never invents budgets, zero-allowed flags or effort levels.
+func (f modelFacts) thinkingSupport() *pluginapi.ThinkingSupport {
+	if len(f.efforts) > 0 {
+		return &pluginapi.ThinkingSupport{Levels: append([]string(nil), f.efforts...)}
+	}
+	if f.reasoningSeen && f.reasoning {
+		return &pluginapi.ThinkingSupport{}
+	}
+	return nil
+}
+
+// modelInfo renders one published ModelInfo. The public namespace is applied
+// exactly once and unknown facts remain zero.
+func (f modelFacts) modelInfo() pluginapi.ModelInfo {
+	ownedBy := "command-code"
+	return pluginapi.ModelInfo{
+		ID:                        modelPrefix + f.native,
+		Object:                    "model",
+		Created:                   f.created,
+		OwnedBy:                   ownedBy,
+		DisplayName:               f.name,
+		Name:                      f.native,
+		ContextLength:             f.contextWindow,
+		MaxCompletionTokens:       f.maxOutput,
+		SupportedInputModalities:  append([]string(nil), f.modalities...),
+		SupportedOutputModalities: []string{"text"},
+		Thinking:                  f.thinkingSupport(),
+		UserDefined:               f.userDefined,
+	}
+}
+
+// catalogInfo is the read-only catalog status shown by management clients.
+type catalogInfo struct {
+	Count     int    `json:"count"`
+	Source    string `json:"source"`
+	FetchedAt string `json:"fetched_at"`
+	Stale     bool   `json:"stale"`
+}
+
+// catalogState caches the last successful live public catalog. It is bounded to
+// one snapshot and never grows.
+type catalogState struct {
+	mu          sync.Mutex
+	live        []publicModel
+	liveAt      time.Time
+	lastAttempt time.Time
+	refreshing  bool
+}
+
+// refreshInterval bounds how often a discovery-driven live refresh may run.
+const refreshInterval = time.Minute
+
+// snapshot returns the current public catalog: the last successful live fetch,
+// or the embedded reviewed snapshot marked stale.
+func (m *Manager) catalogSnapshot() ([]publicModel, catalogInfo) {
+	index := loadEmbeddedIndex()
+	m.catalog.mu.Lock()
+	defer m.catalog.mu.Unlock()
+	if m.catalog.live != nil {
+		return m.catalog.live, catalogInfo{
+			Count:     len(m.catalog.live),
+			Source:    "live",
+			FetchedAt: m.catalog.liveAt.UTC().Format(time.RFC3339),
+			Stale:     false,
+		}
+	}
+	return embeddedPublicModels(index), catalogInfo{
+		Count:     len(index.publicOrder),
+		Source:    "embedded",
+		FetchedAt: catalogdata.SnapshotDate,
+		Stale:     true,
+	}
+}
+
+// embeddedPublicModels materializes the embedded public catalog in reviewed order.
+func embeddedPublicModels(index catalogIndex) []publicModel {
+	models := make([]publicModel, 0, len(index.publicOrder))
+	for _, id := range index.publicOrder {
+		models = append(models, index.public[id])
+	}
+	return models
+}
+
+// catalogInfoForMode reports the read-only catalog status for the current mode.
+// CLI mode always publishes the reviewed embedded snapshot; provider mode
+// reports the live snapshot or the stale last-good fallback.
+func (m *Manager) catalogInfoForMode(cfg Config) catalogInfo {
+	if cfg.Mode == ModeCLI {
+		index := loadEmbeddedIndex()
+		return catalogInfo{
+			Count:     len(index.publicOrder),
+			Source:    "embedded",
+			FetchedAt: catalogdata.SnapshotDate,
+			Stale:     false,
+		}
+	}
+	_, info := m.catalogSnapshot()
+	return info
+}
+
+// refreshCatalog performs at most one anonymous GET /provider/v1/models per
+// refreshInterval and atomically replaces the live snapshot on success. Any
+// failure keeps the previous last-good snapshot; nothing is ever cleared.
+func (m *Manager) refreshCatalog(run chan struct{}, callbackID string) {
+	m.catalog.mu.Lock()
+	if m.catalog.refreshing {
+		m.catalog.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	if !m.catalog.lastAttempt.IsZero() && now.Sub(m.catalog.lastAttempt) < refreshInterval {
+		m.catalog.mu.Unlock()
+		return
+	}
+	m.catalog.refreshing = true
+	m.catalog.lastAttempt = now
+	m.catalog.mu.Unlock()
+
+	models, errFetch := m.fetchPublicCatalog(run, callbackID)
+
+	m.catalog.mu.Lock()
+	defer m.catalog.mu.Unlock()
+	m.catalog.refreshing = false
+	if errFetch != nil || models == nil {
+		return
+	}
+	m.catalog.live = models
+	m.catalog.liveAt = time.Now()
+}
+
+// fetchPublicCatalog reads the anonymous public catalog through the host. It is
+// unauthenticated by design: it must never send a selected credential.
+func (m *Manager) fetchPublicCatalog(run chan struct{}, callbackID string) ([]publicModel, error) {
+	cfg := m.config()
+	headers := http.Header{}
+	headers.Set("Accept", "application/json")
+	headers.Set("User-Agent", PluginID+"/"+Version)
+	resp, errDo := m.doHTTP(run, callbackID, http.MethodGet, joinURL(cfg.BaseURL, endpointProviderModels), headers, nil, nil)
+	if errDo != nil {
+		return nil, errDo
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, upstreamError(resp.StatusCode)
+	}
+	return decodePublicCatalog(resp.Body)
+}
+
+// catalogInvalid reports an unusable upstream catalog without echoing any of it.
+func catalogInvalid() error {
+	return &ProviderError{
+		Code:       "invalid_upstream",
+		Message:    "upstream model catalog is invalid",
+		HTTPStatus: http.StatusBadGateway,
+	}
+}
+
+// decodePublicCatalog validates one public catalog response. Native order and
+// facts are preserved, the public prefix is applied exactly once by modelInfo,
+// and duplicate ids are collapsed. A malformed response rejects the whole
+// catalog so partial or invented data is never published.
+func decodePublicCatalog(body []byte) ([]publicModel, error) {
+	var decoded publicCatalog
+	if err := json.Unmarshal(body, &decoded); err != nil || decoded.Data == nil {
+		return nil, catalogInvalid()
+	}
+	models := make([]publicModel, 0, len(*decoded.Data))
+	seen := make(map[string]struct{}, len(*decoded.Data))
+	for _, item := range *decoded.Data {
+		native := nativeModelID(item.ID)
+		if native == "" || strings.IndexFunc(native, invalidNativeRune) >= 0 {
+			return nil, catalogInvalid()
+		}
+		if _, ok := seen[native]; ok {
+			continue
+		}
+		seen[native] = struct{}{}
+		models = append(models, item)
+	}
+	return models, nil
+}
+
+// chatCapable reports whether a public entry declares at least one chat-capable
+// endpoint. Decision/system models without a chat endpoint are never published.
+func chatCapable(model publicModel) bool {
+	for _, endpoint := range model.SupportedEndpoints {
+		if _, ok := endpointFormat(endpoint); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// publishedModels builds the effective, deterministic model catalog for the
+// current mode. CLI mode publishes the reviewed CLI ∩ public intersection;
+// provider mode publishes the current public snapshot (live or last-good).
+// The configured whitelist narrows discovered models; manual models are then
+// merged and may override discovered metadata.
+func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
+	index := loadEmbeddedIndex()
+	whitelist := whitelistSet(cfg.Models)
+
+	facts := make([]modelFacts, 0, len(index.publicOrder))
+	if cfg.Mode == ModeProvider {
+		models, _ := m.catalogSnapshot()
+		for _, model := range models {
+			if !chatCapable(model) {
+				continue
+			}
+			native := nativeModelID(model.ID)
+			cli, haveCLI := index.cli[native]
+			var entry modelFacts
+			if haveCLI {
+				entry = factsFromCLI(cli)
+			} else {
+				entry = modelFacts{native: native}
+			}
+			entry = entry.mergePublic(model, haveCLI)
+			if !allowed(whitelist, entry.native) {
+				continue
+			}
+			facts = append(facts, entry)
+		}
+	} else {
+		for _, native := range index.cliOrder {
+			model, ok := index.public[native]
+			if !ok {
+				continue
+			}
+			if !allowed(whitelist, native) {
+				continue
+			}
+			entry := factsFromCLI(index.cli[native]).mergePublic(model, true)
+			facts = append(facts, entry)
+		}
+	}
+
+	byNative := make(map[string]int, len(facts))
+	for i, entry := range facts {
+		byNative[entry.native] = i
+	}
+	for _, manual := range cfg.ManualModels {
+		if i, ok := byNative[manual.ID]; ok {
+			facts[i] = facts[i].applyManual(manual)
+			continue
+		}
+		entry := modelFacts{native: manual.ID}
+		if cli, ok := index.cli[manual.ID]; ok {
+			entry = factsFromCLI(cli)
+		}
+		if model, ok := index.public[manual.ID]; ok {
+			entry = entry.mergePublic(model, entry.name != "")
+		}
+		facts = append(facts, entry.applyManual(manual))
+		byNative[manual.ID] = len(facts) - 1
+	}
+
+	models := make([]pluginapi.ModelInfo, 0, len(facts))
+	for _, entry := range facts {
+		if entry.native == "" {
+			continue
+		}
+		models = append(models, entry.modelInfo())
+	}
+	return models
+}
+
+func whitelistSet(models []string) map[string]bool {
+	if len(models) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(models))
+	for _, model := range models {
+		set[model] = true
+	}
+	return set
+}
+
+func allowed(whitelist map[string]bool, native string) bool {
+	if whitelist == nil {
+		return true
+	}
+	return whitelist[native]
+}
+
+// lookupFacts resolves one native model for execution, applying manual overrides
+// and returning false when the model is not part of the published catalog.
+func (m *Manager) lookupFacts(cfg Config, native string) (modelFacts, bool) {
+	index := loadEmbeddedIndex()
+	var entry modelFacts
+	found := false
+	cli, haveCLI := index.cli[native]
+	if haveCLI {
+		entry = factsFromCLI(cli)
+	}
+	if cfg.Mode == ModeProvider {
+		models, _ := m.catalogSnapshot()
+		for _, model := range models {
+			if nativeModelID(model.ID) != native {
+				continue
+			}
+			entry = entry.mergePublic(model, haveCLI)
+			found = true
+			break
+		}
+	} else if haveCLI {
+		if model, ok := index.public[native]; ok {
+			entry = entry.mergePublic(model, true)
+		}
+		found = true
+	}
+	for _, manual := range cfg.ManualModels {
+		if manual.ID == native {
+			entry = entry.applyManual(manual)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return modelFacts{}, false
+	}
+	if !allowed(whitelistSet(cfg.Models), native) && !isManual(cfg.ManualModels, native) {
+		return modelFacts{}, false
+	}
+	return entry, true
+}
+
+func isManual(models []ManualModel, native string) bool {
+	for _, model := range models {
+		if model.ID == native {
+			return true
+		}
+	}
+	return false
+}
+
+// endpointForFormat returns the public supported_endpoints value for a format.
+func endpointForFormat(format translator.Format) string {
+	switch format {
+	case translator.FormatOpenAI:
+		return "/chat/completions"
+	case translator.FormatClaude:
+		return "/messages"
+	case translator.FormatOpenAIResponse:
+		return "/responses"
+	default:
+		return ""
+	}
+}
+
+// endpointDeclared reports whether a target format is declared by a model.
+func endpointDeclared(endpoints []string, target translator.Format) bool {
+	want := endpointForFormat(target)
+	if want == "" {
+		return false
+	}
+	for _, endpoint := range endpoints {
+		if strings.TrimSpace(endpoint) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// sdkFormatFor maps a wire protocol onto the SDK conversion format. The OpenAI
+// Responses wire protocol is converted through the SDK "codex" format whose
+// transformers are registered for the ordinary Responses API on both sides.
+func sdkFormatFor(wire translator.Format) translator.Format {
+	if wire == translator.FormatOpenAIResponse {
+		return translator.FormatCodex
+	}
+	return wire
+}
+
+// translationSupported reports whether the SDK can bridge client<->upstream in
+// both directions. The request direction is checked against the client request
+// format and the response direction against the client response format, so a
+// mismatch between them cannot authorize a conversion with no translator.
+func translationSupported(clientReq, clientResp, target translator.Format, stream bool) bool {
+	sdk := sdkFormatFor(target)
+	if clientReq != target && !translator.HasRequestTransformer(clientReq, sdk) {
+		return false
+	}
+	if clientResp == target {
+		return true
+	}
+	if stream {
+		return translator.HasStreamResponseTransformer(clientResp, sdk)
+	}
+	return translator.HasNonStreamResponseTransformer(clientResp, sdk)
+}
+
+// resolveTargetFormat selects a deterministic upstream endpoint format:
+// the client's native protocol when the model declares it, otherwise the first
+// declared endpoint (in fixed protocol order) that the SDK can bridge in both
+// directions. A model that supports none fails closed.
+func resolveTargetFormat(clientReq, clientResp translator.Format, endpoints []string, stream bool) (translator.Format, bool) {
+	if clientReq == clientResp && endpointDeclared(endpoints, clientReq) && translationSupported(clientReq, clientResp, clientReq, stream) {
+		return clientReq, true
+	}
+	for _, candidate := range []translator.Format{translator.FormatOpenAI, translator.FormatClaude, translator.FormatOpenAIResponse} {
+		if !endpointDeclared(endpoints, candidate) {
+			continue
+		}
+		if translationSupported(clientReq, clientResp, candidate, stream) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
