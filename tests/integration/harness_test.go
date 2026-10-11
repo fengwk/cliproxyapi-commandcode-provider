@@ -257,6 +257,12 @@ func newHarnessZDR(t *testing.T, mode string, zdr bool) *harness {
 // plugin store and launches the real binary with the minimal environment.
 func startHost(t *testing.T, wire *wireServer, mode string, zdr bool, dir string) (*harness, error) {
 	t.Helper()
+	return startHostManual(t, wire, mode, zdr, dir, nil)
+}
+
+// startHostManual is startHost with explicit manual model registrations.
+func startHostManual(t *testing.T, wire *wireServer, mode string, zdr bool, dir string, manuals []manualModelConfig) (*harness, error) {
+	t.Helper()
 	cpaBin, err := requireCPABinary()
 	if err != nil {
 		return nil, err
@@ -281,10 +287,44 @@ func startHost(t *testing.T, wire *wireServer, mode string, zdr bool, dir string
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	configPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(configPath, hostConfig(port, authDir, pluginsDir, wire.baseURL(), mode, zdr), 0o600); err != nil {
+	if err := os.WriteFile(configPath, hostConfigManual(port, authDir, pluginsDir, wire.baseURL(), mode, zdr, manuals), 0o600); err != nil {
 		return nil, err
 	}
 
+	return launchPreparedHost(t, cpaBin, dir, authDir, configPath, mode, baseURL, port, wire)
+}
+
+// launchHost restarts an already prepared config directory without rewriting
+// its plugin default. Callers use it to prove a changed default against
+// credentials that were already on disk. wire may be nil only for a host that
+// will not receive upstream traffic.
+func launchHost(t *testing.T, wire *wireServer, dir string) (*harness, error) {
+	t.Helper()
+	cpaBin, err := requireCPABinary()
+	if err != nil {
+		return nil, err
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+	port, err := freePort()
+	if err != nil {
+		return nil, err
+	}
+	updated := rewriteConfigPort(raw, port)
+	if bytes.Equal(updated, raw) {
+		return nil, errors.New("prepared config has no server port to rebind")
+	}
+	if err := os.WriteFile(configPath, updated, 0o600); err != nil {
+		return nil, err
+	}
+	return launchPreparedHost(t, cpaBin, dir, filepath.Join(dir, "auths"), configPath, modeFromConfig(updated), fmt.Sprintf("http://127.0.0.1:%d", port), port, wire)
+}
+
+func launchPreparedHost(t *testing.T, cpaBin, dir, authDir, configPath, mode, baseURL string, port int, wire *wireServer) (*harness, error) {
+	t.Helper()
 	h := &harness{
 		t:       t,
 		cpaBin:  cpaBin,
@@ -323,6 +363,35 @@ func startHost(t *testing.T, wire *wireServer, mode string, zdr bool, dir string
 	return h, nil
 }
 
+func rewriteConfigPort(raw []byte, port int) []byte {
+	lines := strings.Split(string(raw), "\n")
+	inServer := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "server:") {
+			inServer = true
+			continue
+		}
+		if inServer && strings.HasPrefix(line, "  port:") {
+			lines[i] = fmt.Sprintf("  port: %d", port)
+			return []byte(strings.Join(lines, "\n"))
+		}
+		if inServer && line != "" && !strings.HasPrefix(line, " ") {
+			break
+		}
+	}
+	return raw
+}
+
+func modeFromConfig(raw []byte) string {
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "mode:") {
+			return strings.Trim(strings.TrimPrefix(line, "mode:"), " \"")
+		}
+	}
+	return ""
+}
+
 // installPlugin uses the versioned filename produced by the host plugin store.
 func installPlugin(pluginsDir string) error {
 	name := pluginLibName()
@@ -346,6 +415,24 @@ func installPlugin(pluginsDir string) error {
 // hostConfig renders an isolated v8 config with fake credentials only. The
 // plugin base-url is the raw-TCP mock authority; store is the host-owned manifest.
 func hostConfig(port int, authDir, pluginsDir, upstreamAuthority, mode string, zdr bool) []byte {
+	return hostConfigManual(port, authDir, pluginsDir, upstreamAuthority, mode, zdr, nil)
+}
+
+// hostConfigManual is hostConfig plus explicit manual model registrations.
+// A nil list leaves the field absent so existing suites stay unchanged.
+func hostConfigManual(port int, authDir, pluginsDir, upstreamAuthority, mode string, zdr bool, manuals []manualModelConfig) []byte {
+	manualYAML := ""
+	if manuals != nil {
+		var b strings.Builder
+		b.WriteString("      manual-models:\n")
+		for _, model := range manuals {
+			fmt.Fprintf(&b, "        - id: %q\n", model.ID)
+			if model.Protocol != "" {
+				fmt.Fprintf(&b, "          protocol: %q\n", model.Protocol)
+			}
+		}
+		manualYAML = b.String()
+	}
 	return []byte(fmt.Sprintf(`config-version: 8
 server:
   host: "127.0.0.1"
@@ -377,7 +464,7 @@ plugins:
       mode: %q
       base-url: %q
       zdr: %t
-      store:
+%s      store:
         id: cliproxyapi-commandcode-provider
         name: CommandCode Provider
         version: %q
@@ -387,7 +474,13 @@ plugins:
         source-url: http://127.0.0.1/registry.json
         install:
           type: github-release
-`, port, mgmtKey, clientKey, authDir, pluginsDir, pluginID, mode, upstreamAuthority, zdr, pluginVersion, "v"+pluginVersion))
+`, port, mgmtKey, clientKey, authDir, pluginsDir, pluginID, mode, upstreamAuthority, zdr, manualYAML, pluginVersion, "v"+pluginVersion))
+}
+
+// manualModelConfig is one explicit manual-models entry written into host YAML.
+type manualModelConfig struct {
+	ID       string
+	Protocol string
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA
@@ -544,19 +637,32 @@ func managementHeaders() map[string]string {
 // importKeys imports fake upstream keys through the plugin management route and
 // waits for the host to publish the plugin model catalog and actually serve a
 // request. Credential and per-auth model registration is asynchronous, so a
-// bounded poll avoids a race.
+// bounded poll avoids a race. Omitting mode keeps the plugin default.
 func (h *harness) importKeys(t *testing.T, keys []string, label string) (int, []byte) {
 	t.Helper()
-	payload, err := json.Marshal(map[string]any{"keys": keys, "label": label})
+	return h.importKeysMode(t, keys, label, "")
+}
+
+// importKeysMode is importKeys with an explicit credential mode. An empty mode
+// omits the field so the plugin default is persisted. Readiness still uses a
+// shared family; callers that need a mode-exclusive model poll that model
+// themselves.
+func (h *harness) importKeysMode(t *testing.T, keys []string, label, mode string) (int, []byte) {
+	t.Helper()
+	body := map[string]any{"keys": keys, "label": label}
+	if mode != "" {
+		body["mode"] = mode
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal import request: %v", err)
 	}
-	status, body := h.doJSON(t, http.MethodPost, "/v0/management/plugins/"+pluginID+"/keys", payload, managementHeaders())
+	status, data := h.doJSON(t, http.MethodPost, "/v0/management/plugins/"+pluginID+"/keys", payload, managementHeaders())
 	if status == http.StatusOK {
 		h.waitForCatalog(t, 10*time.Second, familyClaude, familyChatResp, familyChatOnly)
 		h.waitForServing(t, familyChatResp, 10*time.Second)
 	}
-	return status, body
+	return status, data
 }
 
 // waitForServing retries a minimal native chat request until the host actually
