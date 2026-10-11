@@ -20,26 +20,34 @@ func decodeEnvelope(t *testing.T, raw []byte) pluginabi.Envelope {
 	return env
 }
 
-func decodeResult[T any](t *testing.T, env pluginabi.Envelope) T {
+func decodeResult[T any](t *testing.T, response pluginapi.ManagementResponse) T {
 	t.Helper()
-	if !env.OK {
-		t.Fatalf("expected ok envelope, got %+v", env.Error)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		t.Fatalf("expected successful management response, got %d: %s", response.StatusCode, response.Body)
 	}
 	var out T
-	if err := json.Unmarshal(env.Result, &out); err != nil {
-		t.Fatalf("result must decode: %v (%s)", err, env.Result)
+	if err := json.Unmarshal(response.Body, &out); err != nil {
+		t.Fatalf("result must decode: %v (%s)", err, response.Body)
 	}
 	return out
 }
 
-func managementCall(t *testing.T, m *Manager, method, path string, body []byte) pluginabi.Envelope {
+func managementCall(t *testing.T, m *Manager, method, path string, body []byte) pluginapi.ManagementResponse {
 	t.Helper()
 	request, _ := json.Marshal(map[string]any{"method": method, "path": path, "body": body})
 	raw, err := m.handleManagement(request)
 	if err != nil {
 		t.Fatalf("handleManagement returned transport error: %v", err)
 	}
-	return decodeEnvelope(t, raw)
+	env := decodeEnvelope(t, raw)
+	if !env.OK {
+		t.Fatalf("management transport failed: %+v", env.Error)
+	}
+	var response pluginapi.ManagementResponse
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatalf("management response must decode: %v", err)
+	}
+	return response
 }
 
 func TestManagementRegistration(t *testing.T) {
@@ -81,8 +89,8 @@ func TestListKeysFailureIsSanitized(t *testing.T) {
 	host.handler = func(string, []byte) (any, error) { return nil, errFake }
 	m := host.manager()
 	env := managementCall(t, m, http.MethodGet, managementPath+keysRoute, nil)
-	if env.OK || env.Error == nil || env.Error.Code != "host_call_failed" {
-		t.Fatalf("a failed listing must be a sanitized error: %+v", env.Error)
+	if env.StatusCode != http.StatusBadGateway || string(env.Body) != `{"error":"unable to list credentials"}` {
+		t.Fatalf("a failed listing must be a sanitized 502: %+v", env)
 	}
 }
 
@@ -108,7 +116,7 @@ func TestImportKeysDedupesAndSerializes(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{"keys": []string{"fresh", "fresh", "existing"}, "label": "work"})
 	env := managementCall(t, m, http.MethodPost, managementPath+keysRoute, body)
 	result := decodeResult[map[string]int](t, env)
-	if result["imported"] != 1 || result["skipped"] != 2 {
+	if result["imported"] != 1 || result["skipped"] != 1 || result["failed"] != 0 {
 		t.Fatalf("dedupe/existing handling wrong: %+v", result)
 	}
 	if len(saved) != 1 || saved[0] != keyFileName("fresh") {
@@ -132,8 +140,8 @@ func TestImportKeysNoWritesWhenListFails(t *testing.T) {
 	m := host.manager()
 	body, _ := json.Marshal(map[string]any{"keys": []string{"k"}})
 	env := managementCall(t, m, http.MethodPost, managementPath+keysRoute, body)
-	if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusBadGateway {
-		t.Fatalf("a failed listing must abort with 502: %+v", env.Error)
+	if env.StatusCode != http.StatusBadGateway {
+		t.Fatalf("a failed listing must abort with 502: %+v", env)
 	}
 	if saves != 0 {
 		t.Fatalf("a failed listing must produce zero writes, got %d", saves)
@@ -144,8 +152,8 @@ func TestImportKeysRejectsOversizedInput(t *testing.T) {
 	m := testManager(ModeCLI)
 	body, _ := json.Marshal(map[string]any{"keys": []string{"a b"}})
 	env := managementCall(t, m, http.MethodPost, managementPath+keysRoute, body)
-	if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusBadRequest {
-		t.Fatalf("unsafe keys must be rejected before persistence: %+v", env.Error)
+	if env.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unsafe keys must be rejected before persistence: %+v", env)
 	}
 }
 
@@ -153,13 +161,13 @@ func TestValidateManualPatch(t *testing.T) {
 	m := testManager(ModeCLI)
 	valid := []byte(`{"manual-models":[{"id":"x","protocol":"openai"}]}`)
 	env := managementCall(t, m, http.MethodPost, managementPath+validateRoute, valid)
-	if !env.OK {
-		t.Fatalf("valid patch must pass: %+v", env.Error)
+	if env.StatusCode != http.StatusOK {
+		t.Fatalf("valid patch must pass: %+v", env)
 	}
 	invalid := []byte(`{"manual-models":[{"id":"x","protocol":"nope"}],"mode":"provider"}`)
 	env = managementCall(t, m, http.MethodPost, managementPath+validateRoute, invalid)
-	if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusBadRequest {
-		t.Fatalf("patch with extra or invalid fields must be rejected: %+v", env.Error)
+	if env.StatusCode != http.StatusBadRequest {
+		t.Fatalf("patch with extra or invalid fields must be rejected: %+v", env)
 	}
 }
 
@@ -183,8 +191,8 @@ func TestResourceRoutesServeUI(t *testing.T) {
 	m := testManager(ModeCLI)
 	for _, path := range []string{"/ui", "/ui.js", "/ui.css"} {
 		env := managementCall(t, m, http.MethodGet, authResourcePath+path, nil)
-		if !env.OK {
-			t.Fatalf("%s must be served: %+v", path, env.Error)
+		if env.StatusCode != http.StatusOK || len(env.Body) == 0 || env.Headers.Get("Content-Security-Policy") == "" {
+			t.Fatalf("%s must be served with its CSP: %+v", path, env)
 		}
 	}
 }
