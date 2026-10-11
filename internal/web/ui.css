@@ -437,6 +437,57 @@ td.empty-cell {
   padding: 1.25rem;
 }
 
+td.cell-mode {
+  white-space: nowrap;
+}
+
+.select-mode {
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  vertical-align: middle;
+  margin-right: 0.4rem;
+}
+
+.mode-source-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+.mode-source-badge.mode-error {
+  color: var(--error-color);
+  font-weight: 600;
+}
+
+.mode-source-badge.mode-auth {
+  color: var(--primary-color);
+}
+
+#import-mode {
+  width: 100%;
+  max-width: 100%;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+#import-mode:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(139, 134, 128, 0.18);
+}
+
 td.cell-actions {
   white-space: nowrap;
 }

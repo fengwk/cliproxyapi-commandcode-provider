@@ -164,10 +164,13 @@ function validateLabel(label) {
 }
 
 // Build the exact JSON body that will be POSTed, and check the byte budget.
-function buildImportPayload(keys, label) {
+function buildImportPayload(keys, label, mode) {
   var payload = { keys: Array.isArray(keys) ? keys.slice() : [] };
   if (typeof label === "string" && label) {
     payload.label = label;
+  }
+  if (typeof mode === "string" && mode) {
+    payload.mode = mode;
   }
   var body = JSON.stringify(payload);
   var bytes = utf8ByteLength(body);
@@ -409,10 +412,22 @@ function normalizeFileEntries(files) {
     }
     var rawName = typeof entry.name === "string" ? entry.name : "";
     var rawIndex = typeof entry.auth_index === "string" ? entry.auth_index : "";
+    var rawMode = typeof entry.mode === "string" ? entry.mode.trim() : "";
+    var rawModeSource = typeof entry.mode_source === "string" ? entry.mode_source.trim() : "";
+    var modeError = entry.mode_error === true || (rawMode !== "" && rawMode !== "cli" && rawMode !== "provider");
+    if (!rawMode && !modeError) {
+      modeError = true;
+    }
+    var mode = modeError ? "" : rawMode;
+    var modeSource = modeError ? "" : (rawModeSource === "auth" || rawModeSource === "default" ? rawModeSource : "");
+
     rows.push({
       rawName: rawName,
       name: toCellText(rawName),
       label: toCellText(entry.label),
+      mode: mode,
+      modeSource: modeSource,
+      modeError: modeError,
       status: toCellText(entry.status),
       disabled: entry.disabled === true,
       unavailable: entry.unavailable === true,
@@ -739,6 +754,7 @@ function initUi() {
     importForm: doc.getElementById("import-form"),
     keys: doc.getElementById("keys"),
     label: doc.getElementById("label"),
+    importMode: doc.getElementById("import-mode"),
     importBtn: doc.getElementById("import-btn"),
     importProgress: doc.getElementById("import-progress"),
     reloadBtn: doc.getElementById("reload-btn"),
@@ -834,14 +850,20 @@ function initUi() {
     // text the user typed after submitting.
     el.keys.disabled = disabled;
     el.label.disabled = disabled;
+    if (el.importMode) el.importMode.disabled = disabled;
     el.importProgress.hidden = !flag;
     var actionButtons = el.filesBody.querySelectorAll("button[data-action]");
     for (var i = 0; i < actionButtons.length; i++) {
       var blocked = disabled;
-      if (actionButtons[i].getAttribute("data-action") === "quota") {
+      var action = actionButtons[i].getAttribute("data-action");
+      if (action === "quota" || action === "save-mode") {
         blocked = disabled || !isSafeAuthIndex(actionButtons[i].getAttribute("data-auth-index"));
       }
       actionButtons[i].disabled = blocked;
+    }
+    var modeSelects = el.filesBody.querySelectorAll("select[data-role='mode-select']");
+    for (var s = 0; s < modeSelects.length; s++) {
+      modeSelects[s].disabled = disabled || !isSafeAuthIndex(modeSelects[s].getAttribute("data-auth-index"));
     }
   }
 
@@ -851,6 +873,7 @@ function initUi() {
     el.mgmtKey.disabled = !secureContext;
     el.keys.disabled = !secureContext;
     el.label.disabled = !secureContext;
+    if (el.importMode) el.importMode.disabled = !secureContext;
     clearQuota();
     setBusy(false);
     if (secureContext) {
@@ -882,6 +905,77 @@ function initUi() {
     var tr = doc.createElement("tr");
     appendCell(tr, row.name, "cell-name");
     appendCell(tr, row.label || "—");
+
+    var modeCell = doc.createElement("td");
+    modeCell.className = "cell-mode";
+
+    var modeSelect = doc.createElement("select");
+    modeSelect.className = "select-mode";
+    modeSelect.setAttribute("data-role", "mode-select");
+    modeSelect.setAttribute("data-auth-index", row.authIndex);
+    modeSelect.setAttribute("aria-label", "修改密钥 " + toCellText(row.rawName) + " 的模式");
+
+    if (row.modeError || !row.mode) {
+      var invalidOption = doc.createElement("option");
+      invalidOption.value = "";
+      invalidOption.textContent = "无效 / 不可读";
+      invalidOption.disabled = true;
+      invalidOption.selected = true;
+      modeSelect.appendChild(invalidOption);
+    }
+
+    var cliOption = doc.createElement("option");
+    cliOption.value = "cli";
+    cliOption.textContent = "CLI 模式 (cli)";
+    if (row.mode === "cli" && !row.modeError) {
+      cliOption.selected = true;
+    }
+    modeSelect.appendChild(cliOption);
+
+    var providerOption = doc.createElement("option");
+    providerOption.value = "provider";
+    providerOption.textContent = "Provider 模式 (provider)";
+    if (row.mode === "provider" && !row.modeError) {
+      providerOption.selected = true;
+    }
+    modeSelect.appendChild(providerOption);
+
+    modeSelect.value = row.modeError ? "" : row.mode;
+    modeSelect.disabled = busy || !secureContext || !isSafeAuthIndex(row.authIndex);
+    modeCell.appendChild(modeSelect);
+
+    var saveModeBtn = doc.createElement("button");
+    saveModeBtn.type = "button";
+    saveModeBtn.className = "btn btn-secondary btn-sm";
+    saveModeBtn.setAttribute("data-action", "save-mode");
+    saveModeBtn.setAttribute("data-auth-index", row.authIndex);
+    saveModeBtn.setAttribute("data-file-name", row.rawName);
+    saveModeBtn.textContent = "保存模式";
+    saveModeBtn.setAttribute("aria-label", "保存密钥 " + toCellText(row.rawName) + " 的模式配置");
+    saveModeBtn.disabled = busy || !secureContext || !isSafeAuthIndex(row.authIndex);
+    saveModeBtn.addEventListener("click", function (event) {
+      onSaveModeClick(event, modeSelect);
+    });
+    modeCell.appendChild(saveModeBtn);
+
+    if (row.modeError) {
+      var modeBadge = doc.createElement("span");
+      modeBadge.className = "mode-source-badge mode-error";
+      modeBadge.textContent = "模式异常";
+      modeCell.appendChild(modeBadge);
+    } else if (row.modeSource === "default") {
+      var modeBadge = doc.createElement("span");
+      modeBadge.className = "mode-source-badge mode-default";
+      modeBadge.textContent = "旧凭据默认";
+      modeCell.appendChild(modeBadge);
+    } else if (row.modeSource === "auth") {
+      var modeBadge = doc.createElement("span");
+      modeBadge.className = "mode-source-badge mode-auth";
+      modeBadge.textContent = "已单独配置";
+      modeCell.appendChild(modeBadge);
+    }
+    tr.appendChild(modeCell);
+
     appendCell(tr, row.status || "—");
     appendCell(tr, row.disabled ? "是" : "否");
     appendCell(tr, row.unavailable ? "不可用" : "可用", row.unavailable ? "cell-warn" : "cell-ok");
@@ -945,7 +1039,7 @@ function initUi() {
     if (!rows.length) {
       var emptyRow = doc.createElement("tr");
       var emptyCell = doc.createElement("td");
-      emptyCell.colSpan = 8;
+      emptyCell.colSpan = 9;
       emptyCell.className = "empty-cell";
       emptyCell.textContent = "暂无数据。";
       emptyRow.appendChild(emptyCell);
@@ -976,7 +1070,11 @@ function initUi() {
       return;
     }
     if (el.settingMode) {
-      el.settingMode.textContent = settings.mode === "provider" ? "Provider 模式" : "CLI 模式（默认）";
+      var effectiveMode =
+        typeof settings.default_mode === "string" && settings.default_mode
+          ? settings.default_mode
+          : settings.mode;
+      el.settingMode.textContent = effectiveMode === "provider" ? "Provider 模式" : "CLI 模式（默认）";
     }
     if (el.settingCliVersion) {
       el.settingCliVersion.textContent = toCellText(settings.cli_version) || "1.79.2";
@@ -1085,7 +1183,8 @@ function initUi() {
       return;
     }
 
-    var payload = buildImportPayload(parsed.keys, labelCheck.value);
+    var importMode = el.importMode && el.importMode.value ? el.importMode.value : "cli";
+    var payload = buildImportPayload(parsed.keys, labelCheck.value, importMode);
     var expectedCount = parsed.counts.valid;
     parsed.keys.length = 0;
     if (!payload.ok) {
@@ -1124,6 +1223,112 @@ function initUi() {
       .then(function () {
         managementKey = "";
         payload.body = "";
+        setBusy(false);
+      });
+  }
+
+  function onSaveModeClick(event, selectElem) {
+    if (busy || !secureContext) {
+      return;
+    }
+    var button = (event && event.currentTarget) || (event && event.target);
+    var authIndex = button ? button.getAttribute("data-auth-index") : "";
+    var fileName = button ? button.getAttribute("data-file-name") : "";
+    var select = selectElem;
+    if (!select && button && button.parentNode) {
+      var list = button.parentNode.querySelectorAll("select");
+      if (list && list.length > 0) {
+        select = list[0];
+      }
+    }
+    var selectedMode = select ? select.value : "";
+    saveMode(authIndex, selectedMode, fileName);
+  }
+
+  function saveMode(authIndex, selectedMode, fileName) {
+    if (busy || !secureContext) {
+      return;
+    }
+    if (!isSafeAuthIndex(authIndex)) {
+      setStatus("凭据索引无效，无法保存模式。", "error");
+      return;
+    }
+    if (selectedMode !== "cli" && selectedMode !== "provider") {
+      setStatus("请先选择有效的模式（CLI 或 Provider）。", "error");
+      return;
+    }
+    var managementKey = currentKey();
+    if (!managementKey) {
+      setStatus("请先输入 CPA 管理密钥。", "error");
+      el.mgmtKey.focus();
+      return;
+    }
+
+    var patchPayload = JSON.stringify({ auth_index: authIndex.trim(), mode: selectedMode });
+
+    clearQuota();
+    setBusy(true);
+    setStatus("正在保存模式配置…", "info");
+
+    fetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "PATCH", body: patchPayload }))
+      .then(function (response) {
+        if (response.status === 401 || response.status === 403) {
+          disconnect();
+          setStatus(describeHttpFailure(response.status), "error");
+          return null;
+        }
+        if (!response.ok) {
+          setStatus(describeHttpFailure(response.status), "error");
+          return null;
+        }
+        return readJson(response);
+      })
+      .then(function (patchResult) {
+        if (!patchResult) {
+          return null;
+        }
+        setStatus("模式已提交，正在确认生效…", "info");
+        return fetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "GET" }))
+          .then(function (getResponse) {
+            if (getResponse.status === 401 || getResponse.status === 403) {
+              disconnect();
+              setStatus(describeHttpFailure(getResponse.status), "error");
+              return null;
+            }
+            if (!getResponse.ok) {
+              setStatus("模式已提交，但无法获取最新列表以确认生效（" + getResponse.status + "）。", "error");
+              return null;
+            }
+            return readJson(getResponse);
+          })
+          .then(function (getPayload) {
+            if (!getPayload) {
+              return;
+            }
+            var rows = normalizeFileEntries(isPlainObject(getPayload) ? getPayload.files : []);
+            renderFiles(rows);
+            var confirmed = false;
+            for (var i = 0; i < rows.length; i++) {
+              if (rows[i].authIndex === authIndex) {
+                if (rows[i].mode === selectedMode && rows[i].modeSource === "auth" && !rows[i].modeError) {
+                  confirmed = true;
+                }
+                break;
+              }
+            }
+            if (confirmed) {
+              setStatus("密钥模式已更新为 " + (selectedMode === "provider" ? "Provider 模式" : "CLI 模式") + " 并确认生效。", "ok");
+            } else {
+              setStatus("模式配置未能确认生效，请核对凭据状态或刷新列表。", "error");
+            }
+          });
+      })
+      .catch(function () {
+        setStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
+      })
+      .then(function () {
+        managementKey = "";
+        patchPayload = "";
         setBusy(false);
       });
   }

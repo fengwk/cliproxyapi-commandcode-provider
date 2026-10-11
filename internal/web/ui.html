@@ -45,6 +45,14 @@
         <input id="label" name="label" type="text" maxlength="128" autocomplete="off" spellcheck="false" aria-describedby="label-hint">
         <p id="label-hint" class="hint">用于在 CPA 中区分这批密钥，最长 128 个字符。</p>
       </div>
+      <div class="field">
+        <label for="import-mode">模式</label>
+        <select id="import-mode" name="mode" aria-describedby="import-mode-hint">
+          <option value="cli" selected>CLI 模式 (cli)</option>
+          <option value="provider">Provider 模式 (provider)</option>
+        </select>
+        <p id="import-mode-hint" class="hint">新导入凭据所使用的运行模式（默认 CLI 模式）；仅对本次导入的凭据生效，不影响既有凭据。</p>
+      </div>
       <div class="actions">
         <button type="submit" id="import-btn" class="btn btn-primary">导入密钥</button>
         <span id="import-progress" class="hint" hidden>正在提交…</span>
@@ -66,6 +74,7 @@
           <tr>
             <th scope="col">名称</th>
             <th scope="col">标签</th>
+            <th scope="col">模式</th>
             <th scope="col">状态</th>
             <th scope="col">禁用</th>
             <th scope="col">可用性</th>
@@ -75,7 +84,7 @@
           </tr>
         </thead>
         <tbody id="files-body">
-          <tr><td colspan="8" class="empty-cell">暂无数据。</td></tr>
+          <tr><td colspan="9" class="empty-cell">暂无数据。</td></tr>
         </tbody>
       </table>
     </div>
@@ -127,10 +136,10 @@
 
   <section class="card" aria-labelledby="settings-heading">
     <h2 id="settings-heading">5. 运行状态与手动模型</h2>
-    <p class="hint">展示 CommandCode 运行时模式、CLI 兼容版本、基础地址、零数据保留 (ZDR) 与模型目录快照；可配置自定义手动模型。</p>
+    <p class="hint">展示 CommandCode 旧凭据默认模式、CLI 兼容版本、基础地址、零数据保留 (ZDR) 与模型目录快照；可配置自定义手动模型。</p>
     <div id="settings-grid" class="settings-grid">
       <div class="settings-item">
-        <div class="settings-label">运行模式</div>
+        <div class="settings-label">旧凭据默认模式</div>
         <div id="setting-mode" class="settings-value">CLI 模式（默认）</div>
       </div>
       <div class="settings-item">
