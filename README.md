@@ -7,7 +7,7 @@
 - 只读配额查询（CPA 原生 `QuotaProvider`），不轮询、不写回上游。
 - 本仓库是独立插件仓库，不 fork、不修改 CPA 核心，只使用 CPA v8.0.23 的公开 SDK。
 
-> 本文档描述**拟实现/已交付的插件契约**。除特别说明外，所有上游行为均以合成的本地 mock 验证，**没有对真实 CommandCode 服务做过生产验收**（见“与真实上游的验收状态”）。
+> 本文档描述**已实现的插件契约**。除特别说明外，所有上游行为均以合成的本地 mock 验证，**没有对真实 CommandCode 服务做过生产验收**（见“与真实上游的验收状态”）。首版尚未发布，可先按下面的手动构建方式使用。
 
 ## 职责边界
 
@@ -33,7 +33,7 @@
 ### 前置条件
 
 - 支持原生插件的 CPA **v8**。首批验证基线为 **v8.0.23**；插件 SDK 精确固定在 `go.mod`（`github.com/router-for-me/CLIProxyAPI/v8 v8.0.23`）。
-- 本地构建需要 Go 1.26+、C 编译器与 `make`；发布产物提供 linux/amd64、linux/arm64、macOS/arm64。
+- 本地构建需要 Go 1.26+、C 编译器与 `make`；CI 配置的构建目标为 linux/amd64、linux/arm64、macOS/arm64。本轮本地实际验证的平台为 linux/amd64，其他平台须以 CI 执行结果为准。
 
 ### 1. 从自定义插件源安装（推荐）
 
@@ -142,14 +142,17 @@ Body: {"auth_index":"<来自 keys 列表的 index>"}
 
 ## 支持与不支持
 
-**支持**：Text、inline image（`data:` base64，且模型支持 vision）、function tools 与文本 tool result、Chat/Messages/Responses 三协议流式与非流式、显式 `tool_choice: auto`、`n=1`、普通文本 `response_format`、`pause_turn` 协议续跑（同一逻辑请求最多追加 5 次，累计 usage）。
+**CLI 模式支持**：Text、inline image（`data:` base64，且模型支持 vision）、function tools 与文本 tool result、Chat/Messages/Responses 三协议流式与非流式、显式 `tool_choice: auto`、`n=1`、普通文本 `response_format`、`pause_turn` 协议续跑（同一逻辑请求最多追加 5 次，累计 usage）。
 
-**不支持（本地明确拒绝，不静默丢弃）**：
+Provider 模式原协议直通保留上游原生字段，例如 OpenAI Chat 原协议直通允许 `n>1`；需要跨协议转换时，无损表达不了的语义仍在本地拒绝。
+
+**CLI 模式不支持（本地明确拒绝，不静默丢弃）**：
 
 - 远程图片 URL、文件/音频/视频、remote MCP、自定义非 function tool、强制 `tool_choice`、无法无损表达的 structured output。
 - 非 vision 模型收到图片。
 - Responses 的状态型能力：孤立的 `previous_response_id`、`background`、`store`/`retrieve` 等（v1 不伪造服务端持久化）。
-- 精确 token counting（`count_tokens`）、OAuth 登录、通用 `http_request`。
+
+两种模式均不支持精确 token counting（`count_tokens`）、OAuth 登录和通用 `http_request`。
 
 ## 已知限制
 
@@ -179,7 +182,7 @@ CommandCode 服务条款限制逆向工程、未经授权的衍生作品、转�
 
 - 全部集成测试在**本地 loopback 合成上游**上运行；mock 的 usage、错误、响应形状都是人工构造，只证明插件/宿主行为，**不证明真实后端今天返回相同结果**。
 - 示例配置与测试**不含任何真实凭据**；测试中的每个 key 都是合成的。
-- **未对真实 CommandCode 端点做过任何探测或推理调用**，未验证真实套餐权限、配额 schema、缓存效果与扣费。真正后端验收需另行获得账号与调用授权并明确预算。
+- 兼容性事实来自前期公开文档/模型目录研究及本地 CLI 协议审计；**本轮实现验收未使用真实凭据，未调用真实推理或 billing 端点**，未验证真实套餐权限、配额 schema、缓存效果与扣费。真正后端验收需另行获得账号与调用授权并明确预算。
 - 合成 workspace 是否被上游接受、私有 endpoint 的实际接受条件，均待受控验证。
 
 ## 验证与发布

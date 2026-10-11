@@ -60,6 +60,7 @@ func TestValidateClientRequestFeatures(t *testing.T) {
 		{"audio part", "openai", `{"messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{}}]}]}`},
 		{"non function chat tool", "openai", `{"messages":[],"tools":[{"type":"web_search"}]}`},
 		{"thinking budget", "claude", `{"messages":[],"max_tokens":1,"thinking":{"type":"enabled","budget_tokens":1024}}`},
+		{"contradictory thinking", "claude", `{"messages":[],"max_tokens":1,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`},
 		{"forced claude tool", "claude", `{"messages":[],"max_tokens":1,"tool_choice":{"type":"tool","name":"f"}}`},
 		{"redacted thinking", "claude", `{"messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"x"}]}],"max_tokens":1}`},
 		{"server tool", "claude", `{"messages":[],"max_tokens":1,"tools":[{"type":"computer_20241022","name":"c"}]}`},

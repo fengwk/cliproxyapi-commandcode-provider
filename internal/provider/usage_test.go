@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -236,7 +237,8 @@ func TestRestoreCLIControlsResponsesOutputLimit(t *testing.T) {
 }
 
 // TestReasoningEffortPrefersMetadataThenBody proves the effort is resolved from
-// host metadata first and otherwise from the protocol-specific body field.
+// host metadata first, except explicitly disabled thinking, and otherwise from
+// the protocol-specific body field.
 func TestReasoningEffortPrefersMetadataThenBody(t *testing.T) {
 	openai := []byte(`{"reasoning_effort":"high"}`)
 	if got := reasoningEffort(nil, translator.FormatOpenAI, openai); got != "high" {
@@ -329,5 +331,28 @@ func TestUsageProjectorRestoresResponsesTerminalCacheWrite(t *testing.T) {
 	noop.observe([]byte(`{"usage":{"prompt_tokens":10}}`))
 	if out := noop.project([]byte(`{"choices":[{"finish_reason":"stop"}]}`)); string(out) != `{"choices":[{"finish_reason":"stop"}]}` {
 		t.Errorf("native projector must not rewrite frames, got %q", out)
+	}
+}
+
+// Cache subtraction must never wrap into a negative authoritative input count.
+func TestUsageProjectionIntegerBoundaries(t *testing.T) {
+	max := int64(math.MaxInt64)
+	zero := int64(0)
+	s := usageSnapshot{input: &max, cacheRead: &max, cacheWrite: &max}
+	if got := s.exclusiveInput(); got != nil {
+		t.Fatalf("an overflowing cache partition must not produce input tokens: %d", *got)
+	}
+	s.cacheWrite = &zero
+	if got := s.exclusiveInput(); got == nil || *got != 0 {
+		t.Fatalf("an exact partition at MaxInt64 must produce zero uncached input")
+	}
+	if got := sumTokens(max, 0); got == nil || *got != max {
+		t.Fatalf("MaxInt64 must remain an exact supported count")
+	}
+	if got := sumTokens(max, 1); got != nil {
+		t.Fatalf("a derived sum must reject int64 overflow")
+	}
+	if got := sumTokens(-1, 1); got != nil {
+		t.Fatalf("a derived sum must reject negative buckets")
 	}
 }

@@ -61,7 +61,7 @@ func (r *Response) Completion() ([]byte, error)
 - 标准 QuotaFetchResponse 使用 `subscription`、`summary`、`groups`，JSON字段遵循pluginapi，不发额外opaque structure。
 - groups buckets 的 window固定 `five-hour` / `weekly`（仅已知cap>0的实际窗口），remainingFraction=clamp(1-used/cap,0,1)，resetTime来自毫秒时间字段；缺失窗口不伪造0。
 - summary是 credits API明确给出的monthly_credits/purchased_credits/free_credits和同账号这些组件的total_credits（单个账号内相加，不是key池求和）；unit=credits，format=number，不猜USD。不拿monthly余额当cap，不生成假monthly进度条。
-- subscriptions只提供planID/status/period数据；quota仅显示真实可得plan字段，未知计划原样有界展示，不硬编码allowance。
+- subscriptions 上游提供 planID/status/period 数据；CPA v8.0.23 的 QuotaSubscription 没有 Status/period 字段，因此只映射真实 planID，不把 active 等状态伪装为 TierName，不硬编码 allowance。
 
 UI 中文、无框架/CDN/浏览器持久密钥、纯文本截断+title、支持proxy prefix、导入/删除/按点击quota、模式和catalog只读状态。可保留手动模型editor，但必须走既有CPA保存路径且失败不清空输入。不轮询、不直接调上游、不做收费连通性推理测试。
 

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"math"
 	"strconv"
 	"strings"
 
@@ -196,7 +197,7 @@ func (s usageSnapshot) exclusiveInput() *int64 {
 	if s.input == nil || s.cacheRead == nil || s.cacheWrite == nil {
 		return nil
 	}
-	if *s.cacheRead+*s.cacheWrite > *s.input {
+	if *s.cacheRead > *s.input || *s.cacheWrite > *s.input-*s.cacheRead {
 		return nil
 	}
 	value := *s.input - *s.cacheRead - *s.cacheWrite
@@ -255,7 +256,7 @@ func sumTokens(values ...int64) *int64 {
 		if value < 0 {
 			return nil
 		}
-		if total > 1<<62-value {
+		if total > math.MaxInt64-value {
 			return nil
 		}
 		total += value
