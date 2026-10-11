@@ -227,6 +227,10 @@ func TestImportKeysPersistsExplicitModeAndSkipsExisting(t *testing.T) {
 	rejected := [][]byte{
 		[]byte(`{"keys":["fresh"],"mode":""}`),
 		[]byte(`{"keys":["fresh"],"mode":"auto"}`),
+		[]byte(`{"keys":["fresh"],"mode":null}`),
+		[]byte(`{"keys":["fresh"],"mode":1}`),
+		[]byte(`{"keys":["fresh"],"mode":"provider","mode":"cli"}`),
+		[]byte(`{"keys":["a"],"keys":["b"]}`),
 		[]byte(`{"keys":["fresh"],"extra":1}`),
 		[]byte(`{"keys":["fresh"]}{"mode":"provider"}`),
 	}
@@ -359,7 +363,10 @@ func TestPatchKeyModePreservesUnknownJSON(t *testing.T) {
 	for _, raw := range [][]byte{
 		[]byte(`{"auth_index":"auth-1"}`),
 		[]byte(`{"auth_index":"auth-1","mode":""}`),
+		[]byte(`{"auth_index":"auth-1","mode":null}`),
 		[]byte(`{"auth_index":"auth-1","mode":"auto"}`),
+		[]byte(`{"auth_index":"auth-1","auth_index":"auth-2","mode":"provider"}`),
+		[]byte(`{"auth_index":"auth-1","mode":"provider","mode":"cli"}`),
 		[]byte(`{"auth_index":"auth-1","mode":"provider","extra":1}`),
 		[]byte(`{"auth_index":"auth-1","mode":"provider"}{}`),
 	} {

@@ -500,12 +500,14 @@ func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
 		entry := modelFacts{native: manual.ID}
 		if i, ok := byNative[manual.ID]; ok {
 			entry = facts[i]
-		} else {
-			if cli, ok := index.cli[manual.ID]; ok {
+		} else if catalog, ok := m.catalogModel(cfg, index, manual.ID); ok {
+			if cli, haveCLI := index.cli[manual.ID]; haveCLI {
 				entry = factsFromCLI(cli)
 			}
-			if model, ok := index.public[manual.ID]; ok && chatCapable(model) {
-				entry = entry.mergePublic(model, entry.name != "")
+			entry = entry.mergePublic(catalog, entry.name != "")
+		} else if cfg.Mode != ModeProvider {
+			if cli, ok := index.cli[manual.ID]; ok {
+				entry = factsFromCLI(cli)
 			}
 		}
 		entry = entry.applyManual(manual)
@@ -538,7 +540,7 @@ func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
 // current catalog. CLI models cannot declare a non text/image input.
 func manualEligible(mode Mode, manual ManualModel, facts modelFacts) bool {
 	if mode == ModeProvider {
-		return len(facts.endpoints) > 0
+		return chatEndpoints(facts.endpoints)
 	}
 	for _, modality := range manual.InputModalities {
 		if !cliModality(modality) {
@@ -546,6 +548,35 @@ func manualEligible(mode Mode, manual ManualModel, facts modelFacts) bool {
 		}
 	}
 	return true
+}
+
+// chatEndpoints reports whether the declared endpoints include one chat route.
+func chatEndpoints(endpoints []string) bool {
+	for _, endpoint := range endpoints {
+		if _, ok := endpointFormat(endpoint); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// catalogModel returns one chat-capable entry from the catalog selected for
+// this config. Provider mode never consults the embedded index directly: a live
+// snapshot that omitted the model stays omitted.
+func (m *Manager) catalogModel(cfg Config, index catalogIndex, native string) (publicModel, bool) {
+	var models []publicModel
+	if cfg.Mode == ModeProvider {
+		models, _ = m.catalogSnapshot(cfg)
+	} else {
+		models = embeddedPublicModels(index)
+	}
+	for _, model := range models {
+		if nativeModelID(model.ID) != native || !chatCapable(model) {
+			continue
+		}
+		return model, true
+	}
+	return publicModel{}, false
 }
 
 func whitelistSet(models []string) map[string]bool {
@@ -577,29 +608,15 @@ func (m *Manager) lookupFacts(cfg Config, native string) (modelFacts, bool) {
 		entry = factsFromCLI(cli)
 	}
 	if cfg.Mode == ModeProvider {
-		models, _ := m.catalogSnapshot(cfg)
-		for _, model := range models {
-			if nativeModelID(model.ID) != native {
-				continue
-			}
-			// A system/decision entry with no chat endpoint is not routable.
-			if !chatCapable(model) {
-				break
-			}
+		if model, ok := m.catalogModel(cfg, index, native); ok {
 			entry = entry.mergePublic(model, haveCLI)
 			found = true
-			break
-		}
-		if !found {
-			if model, ok := index.public[native]; ok && chatCapable(model) {
-				entry = entry.mergePublic(model, haveCLI)
-			}
 		}
 	} else if haveCLI {
-		if model, ok := index.public[native]; ok {
+		if model, ok := m.catalogModel(cfg, index, native); ok {
 			entry = entry.mergePublic(model, true)
+			found = true
 		}
-		found = true
 	}
 	var manual ManualModel
 	manualFound := false

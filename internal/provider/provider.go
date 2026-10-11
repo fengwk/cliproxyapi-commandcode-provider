@@ -40,7 +40,7 @@ func Metadata() pluginapi.Metadata {
 				Name:        "mode",
 				Type:        pluginapi.ConfigFieldTypeEnum,
 				EnumValues:  []string{string(ModeCLI), string(ModeProvider)},
-				Description: "Transport mode: cli calls the CommandCode CLI /alpha/generate wire; provider calls the public /provider/v1 endpoints. Defaults to cli; there is no automatic fallback.",
+				Description: "Legacy default mode for credentials that do not declare one. cli uses /alpha/generate and provider uses /provider/v1. Each auth mode overrides this default; there is no automatic fallback.",
 			},
 			{
 				Name:        "base-url",
@@ -60,7 +60,7 @@ func Metadata() pluginapi.Metadata {
 			{
 				Name:        "manual-models",
 				Type:        pluginapi.ConfigFieldTypeArray,
-				Description: "Explicit model registration: [{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}]. Provider mode requires a declared protocol endpoint.",
+				Description: "Explicit shared model registration: [{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}]. Provider auth still needs a protocol or current catalog endpoint; CLI auth hides non text/image inputs.",
 			},
 		},
 	}

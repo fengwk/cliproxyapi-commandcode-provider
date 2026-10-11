@@ -424,6 +424,52 @@ func TestProviderAuthDiscoversProviderOnlyModel(t *testing.T) {
 	}
 }
 
+func TestCatalogEligibilityStaysWithCurrentSnapshot(t *testing.T) {
+	// A live provider snapshot replaces the embedded catalog. An embedded-only
+	// model must not become routable through a manual entry that has no protocol.
+	host := &fakeHost{}
+	host.handler = func(method string, _ []byte) (any, error) {
+		switch method {
+		case pluginabi.MethodHostHTTPOperationOpen:
+			return map[string]string{"operation_id": "op-1"}, nil
+		case pluginabi.MethodHostHTTPDo:
+			return httpOKResult(`{"data":[{"id":"live-chat","supported_endpoints":["/chat/completions"]},{"id":"decision-only","supported_endpoints":["/system/decide"]}]}`, nil), nil
+		default:
+			return nil, nil
+		}
+	}
+	m := host.manager()
+	m.setConfig(Config{
+		Mode:         ModeProvider,
+		BaseURL:      "http://127.0.0.1:9",
+		ManualModels: []ManualModel{{ID: "claude-sonnet-5"}, {ID: "decision-only"}},
+	})
+	m.refreshCatalog(nil, "")
+	models := m.publishedModels(m.config())
+	for _, model := range models {
+		if strings.HasSuffix(model.ID, "claude-sonnet-5") || strings.HasSuffix(model.ID, "decision-only") {
+			t.Fatalf("live catalog must not revive an omitted or decision-only model: %+v", model)
+		}
+	}
+	if _, ok := m.lookupFacts(m.config(), "claude-sonnet-5"); ok {
+		t.Fatalf("lookup must not use the embedded catalog behind a live snapshot")
+	}
+	if _, ok := m.lookupFacts(m.config(), "decision-only"); ok {
+		t.Fatalf("a decision-only endpoint must not count as a provider endpoint")
+	}
+	if _, ok := m.lookupFacts(m.config(), "live-chat"); !ok {
+		t.Fatalf("the current live chat model must remain routable")
+	}
+	cliOnly := testManager(ModeCLI)
+	if _, ok := cliOnly.lookupFacts(cliOnly.config(), "minimax/minimax-m3-free"); ok {
+		t.Fatalf("a cli-only model must not execute without an explicit manual entry")
+	}
+	explicit := testManager(ModeCLI, ManualModel{ID: "minimax/minimax-m3-free"})
+	if _, ok := explicit.lookupFacts(explicit.config(), "minimax/minimax-m3-free"); !ok {
+		t.Fatalf("an explicit cli-only manual model must remain routable")
+	}
+}
+
 func TestDecodePublicCatalogBounds(t *testing.T) {
 	if _, err := decodePublicCatalog([]byte(`{"data":[{"id":"x","context_length":-1,"supported_endpoints":["/chat/completions"]}]}`)); err == nil {
 		t.Fatalf("a negative context length must be rejected")
