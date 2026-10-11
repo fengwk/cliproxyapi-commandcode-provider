@@ -38,11 +38,13 @@ plugins:
   configs:
     cliproxyapi-commandcode-provider:
       enabled: true
-      # Explicit transport mode, never automatic:
-      #   cli      (default) requests POST <base-url>/alpha/generate (NDJSON)
-      #   provider           requests POST <base-url>/provider/v1/*
-      # The mode is a single global choice per plugin instance; it is shown
-      # read-only in the management UI and cannot silently downgrade.
+      # Default only, never a global switch and never automatic:
+      #   cli      (default) POST <base-url>/alpha/generate (NDJSON)
+      #   provider           POST <base-url>/provider/v1/*
+      # Applies to legacy auth files that omit root mode, and to POST /keys
+      # when mode is absent. An explicit per-auth mode is unchanged by this
+      # value. The UI imports each key with its own mode (CLI preselected) and
+      # can edit it per row. No plan detection and no fallback on 403.
       mode: cli
       # API authority (+ optional path prefix). Do NOT append the versioned
       # path (/alpha, /provider/v1 or /v1); the plugin adds it. Production must
@@ -53,12 +55,13 @@ plugins:
       # is never retried without ZDR.
       zdr: false
       # Optional whitelist. Only these native catalogue ids stay exposed. It
-      # never creates a route outside the catalogue (CLI intersection by
-      # default, or the live provider /provider/v1/models catalogue).
+      # never creates a route outside the catalogue selected by that auth
+      # (embedded CLI intersection, or the live provider catalogue).
       # models:
       #   - "deepseek/deepseek-v4.1-flash"
-      # Explicit extra/override model metadata. Provider mode requires each entry
-      # to declare a supported endpoint protocol; known families may omit it.
+      # Shared manual model metadata. Eligibility depends on the credential mode,
+      # not this default: provider needs a protocol or a current-catalog chat
+      # endpoint; CLI rejects an explicit non text/image input.
       # At most 100 entries, each id at most 200 bytes.
       # manual-models:
       #   - id: "deepseek/deepseek-v4.1-flash"
