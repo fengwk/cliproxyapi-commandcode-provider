@@ -497,18 +497,29 @@ func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
 		byNative[entry.native] = i
 	}
 	for _, manual := range cfg.ManualModels {
+		entry := modelFacts{native: manual.ID}
 		if i, ok := byNative[manual.ID]; ok {
-			facts[i] = facts[i].applyManual(manual)
+			entry = facts[i]
+		} else {
+			if cli, ok := index.cli[manual.ID]; ok {
+				entry = factsFromCLI(cli)
+			}
+			if model, ok := index.public[manual.ID]; ok && chatCapable(model) {
+				entry = entry.mergePublic(model, entry.name != "")
+			}
+		}
+		entry = entry.applyManual(manual)
+		if !manualEligible(cfg.Mode, manual, entry) {
+			if i, ok := byNative[manual.ID]; ok {
+				facts[i].native = ""
+			}
 			continue
 		}
-		entry := modelFacts{native: manual.ID}
-		if cli, ok := index.cli[manual.ID]; ok {
-			entry = factsFromCLI(cli)
+		if i, ok := byNative[manual.ID]; ok {
+			facts[i] = entry
+			continue
 		}
-		if model, ok := index.public[manual.ID]; ok {
-			entry = entry.mergePublic(model, entry.name != "")
-		}
-		facts = append(facts, entry.applyManual(manual))
+		facts = append(facts, entry)
 		byNative[manual.ID] = len(facts) - 1
 	}
 
@@ -520,6 +531,21 @@ func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
 		models = append(models, entry.modelInfo())
 	}
 	return models
+}
+
+// manualEligible applies the same auth-mode gate to publication and execution.
+// Provider models need a proven endpoint from the manual protocol or the
+// current catalog. CLI models cannot declare a non text/image input.
+func manualEligible(mode Mode, manual ManualModel, facts modelFacts) bool {
+	if mode == ModeProvider {
+		return len(facts.endpoints) > 0
+	}
+	for _, modality := range manual.InputModalities {
+		if !cliModality(modality) {
+			return false
+		}
+	}
+	return true
 }
 
 func whitelistSet(models []string) map[string]bool {
@@ -564,18 +590,30 @@ func (m *Manager) lookupFacts(cfg Config, native string) (modelFacts, bool) {
 			found = true
 			break
 		}
+		if !found {
+			if model, ok := index.public[native]; ok && chatCapable(model) {
+				entry = entry.mergePublic(model, haveCLI)
+			}
+		}
 	} else if haveCLI {
 		if model, ok := index.public[native]; ok {
 			entry = entry.mergePublic(model, true)
 		}
 		found = true
 	}
-	for _, manual := range cfg.ManualModels {
-		if manual.ID == native {
-			entry = entry.applyManual(manual)
+	var manual ManualModel
+	manualFound := false
+	for _, candidate := range cfg.ManualModels {
+		if candidate.ID == native {
+			manual = candidate
+			entry = entry.applyManual(candidate)
 			found = true
+			manualFound = true
 			break
 		}
+	}
+	if manualFound && !manualEligible(cfg.Mode, manual, entry) {
+		return modelFacts{}, false
 	}
 	if !found {
 		return modelFacts{}, false

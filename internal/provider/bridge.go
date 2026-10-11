@@ -212,6 +212,15 @@ func (b *Bridge) AuthList() ([]pluginapi.HostAuthFileEntry, error) {
 	return resp.Files, nil
 }
 
+// AuthGet reads one physical auth file through the public host callback.
+// The JSON payload is returned verbatim so a later save can preserve unknown
+// fields and exact numeric literals.
+func (b *Bridge) AuthGet(authIndex string) (pluginapi.HostAuthGetResponse, error) {
+	var resp pluginapi.HostAuthGetResponse
+	err := b.invoke(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: authIndex}, &resp)
+	return resp, err
+}
+
 // AuthSave persists one physical auth file. jsonBody must be a raw JSON object.
 func (b *Bridge) AuthSave(name string, jsonBody json.RawMessage) error {
 	req := struct {

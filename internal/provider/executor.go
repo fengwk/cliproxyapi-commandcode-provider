@@ -71,7 +71,15 @@ func (m *Manager) prepare(req rpcExecutorRequest, stream bool) (*plan, error) {
 	if !ok {
 		return nil, &ProviderError{Code: "unavailable", Message: "plugin is shutting down", HTTPStatus: http.StatusServiceUnavailable}
 	}
-	cfg := m.config()
+	shared := m.config()
+	resolved := resolveAuthMode(req.AuthMetadata, req.AuthAttributes, req.StorageJSON, shared.Mode)
+	if resolved.Invalid {
+		return nil, &ProviderError{Code: "invalid_auth_mode", Message: errInvalidAuthMode.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	// Bind the selected credential mode to this request only. Async execution
+	// keeps the snapshot and never mutates the shared manager config.
+	cfg := shared
+	cfg.Mode = resolved.Mode
 	native := nativeModelID(req.Model)
 	if native == "" {
 		return nil, &ProviderError{Code: "unsupported_model", Message: "model is required", HTTPStatus: http.StatusBadRequest}

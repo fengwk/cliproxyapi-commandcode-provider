@@ -62,13 +62,13 @@ func TestParseConfigBaseURLPolicy(t *testing.T) {
 }
 
 func TestParseConfigManualModels(t *testing.T) {
-	// CLI mode accepts an optional protocol.
+	// Manual model structure is mode-independent. A missing protocol is stored
+	// and later filtered by the credential that would route it.
 	if _, err := parseConfig([]byte("manual-models:\n  - id: some-model\n")); err != nil {
-		t.Fatalf("cli manual model without protocol must be accepted: %v", err)
+		t.Fatalf("manual model without protocol must be accepted: %v", err)
 	}
-	// Provider mode requires a declared endpoint protocol.
-	if _, err := parseConfig([]byte("mode: provider\nmanual-models:\n  - id: some-model\n")); err == nil {
-		t.Fatalf("provider manual model without protocol must be rejected")
+	if _, err := parseConfig([]byte("mode: provider\nmanual-models:\n  - id: some-model\n")); err != nil {
+		t.Fatalf("provider default must not reject a structurally valid manual model: %v", err)
 	}
 	cfg, err := parseConfig([]byte("mode: provider\nmanual-models:\n  - id: some-model\n    protocol: claude\n    context-window: 1000\n"))
 	if err != nil {
@@ -197,16 +197,16 @@ func TestParseConfigWhitelistBoundsAndDedupe(t *testing.T) {
 }
 
 func TestParseConfigManualModelEnums(t *testing.T) {
-	// CLI mode only allows text/image modalities.
+	// The shared enum accepts text/image and the broader provider modalities.
+	// CLI routing filters the latter; config parsing does not.
 	if _, err := parseConfig([]byte("manual-models:\n  - id: m\n    input-modalities: [text, image]\n")); err != nil {
-		t.Fatalf("cli text/image modalities must be accepted: %v", err)
+		t.Fatalf("text/image modalities must be accepted: %v", err)
 	}
-	if _, err := parseConfig([]byte("manual-models:\n  - id: m\n    input-modalities: [audio]\n")); err == nil {
-		t.Fatalf("cli mode must reject non text/image modalities")
+	if _, err := parseConfig([]byte("manual-models:\n  - id: m\n    input-modalities: [audio]\n")); err != nil {
+		t.Fatalf("audio must be structurally accepted: %v", err)
 	}
-	// Provider mode accepts the broader enum.
 	if _, err := parseConfig([]byte("mode: provider\nmanual-models:\n  - id: m\n    protocol: openai\n    input-modalities: [audio]\n")); err != nil {
-		t.Fatalf("provider mode must accept audio: %v", err)
+		t.Fatalf("provider manual model must accept audio: %v", err)
 	}
 	// Blank, control, oversize and duplicate entries are reported, not dropped.
 	bad := []string{

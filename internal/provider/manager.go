@@ -469,8 +469,9 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	return okEnvelope(reg)
 }
 
-// handleModelsForAuth returns the same effective catalog as the static path. The
-// public catalog is anonymous, so per-auth discovery never sends a credential.
+// handleModelsForAuth publishes the catalog of the selected credential. Provider
+// auth refreshes the anonymous public catalog even when the plugin default is
+// CLI. Discovery never sends the credential and never selects a key.
 func (m *Manager) handleModelsForAuth(request []byte) ([]byte, error) {
 	var req struct {
 		pluginapi.AuthModelRequest
@@ -479,7 +480,13 @@ func (m *Manager) handleModelsForAuth(request []byte) ([]byte, error) {
 	if err := json.Unmarshal(request, &req); err != nil {
 		return mustEnvelope(errorResult("invalid_request", "malformed model discovery request", 0))
 	}
-	cfg := m.config()
+	shared := m.config()
+	resolved := resolveAuthMode(req.Metadata, req.Attributes, req.StorageJSON, shared.Mode)
+	if resolved.Invalid {
+		return mustEnvelope(errorResult("invalid_auth_mode", errInvalidAuthMode.Error(), http.StatusBadRequest))
+	}
+	cfg := shared
+	cfg.Mode = resolved.Mode
 	if cfg.Mode == ModeProvider {
 		if run, ok := m.beginRun(); ok {
 			m.refreshCatalog(run, req.HostCallbackID)

@@ -53,6 +53,56 @@ func TestParseAuthPreservesNativeMetadata(t *testing.T) {
 	}
 }
 
+func TestParseAuthRejectsIllegalMode(t *testing.T) {
+	// An absent mode stays compatible with old credentials.
+	resp, err := parseAuth(pluginapi.AuthParseRequest{RawJSON: []byte(`{"type":"commandcode","api_key":"sk-ok"}`), FileName: "cc.json"})
+	if err != nil || resp.Auth.Metadata["mode"] != nil {
+		t.Fatalf("a missing mode must remain absent: %v %+v", err, resp.Auth.Metadata)
+	}
+	resp, err = parseAuth(pluginapi.AuthParseRequest{RawJSON: []byte(`{"type":"commandcode","api_key":"sk-ok","mode":"provider"}`), FileName: "cc.json"})
+	if err != nil || resp.Auth.Metadata["mode"] != "provider" || resp.Auth.Attributes["mode"] != "" {
+		t.Fatalf("a valid mode must stay in metadata only: %v %+v", err, resp.Auth)
+	}
+	for _, raw := range []string{
+		`{"type":"commandcode","api_key":"sk-ok","mode":""}`,
+		`{"type":"commandcode","api_key":"sk-ok","mode":"auto"}`,
+		`{"type":"commandcode","api_key":"sk-ok","mode":1}`,
+		`{"type":"commandcode","api_key":"sk-ok","mode":null}`,
+	} {
+		if _, err := parseAuth(pluginapi.AuthParseRequest{RawJSON: []byte(raw), FileName: "cc.json"}); err == nil {
+			t.Fatalf("illegal mode must fail closed: %s", raw)
+		}
+	}
+}
+
+func TestResolveAuthModePriority(t *testing.T) {
+	// Metadata wins, including when it is illegal; later sources are not a fallback.
+	got := resolveAuthMode(map[string]any{"mode": "provider"}, map[string]string{"mode": "cli"}, []byte(`{"mode":"cli"}`), ModeCLI)
+	if got.Invalid || got.Mode != ModeProvider || got.Source != modeSourceAuth {
+		t.Fatalf("metadata must win: %+v", got)
+	}
+	got = resolveAuthMode(map[string]any{"mode": ""}, map[string]string{"mode": "provider"}, nil, ModeCLI)
+	if !got.Invalid || got.Mode != "" {
+		t.Fatalf("an empty metadata mode must not fall through: %+v", got)
+	}
+	got = resolveAuthMode(nil, map[string]string{"mode": "provider"}, []byte(`{"mode":"cli"}`), ModeCLI)
+	if got.Invalid || got.Mode != ModeProvider {
+		t.Fatalf("attributes must beat storage: %+v", got)
+	}
+	got = resolveAuthMode(nil, nil, []byte(`{"mode":"provider","weight":1}`), ModeCLI)
+	if got.Invalid || got.Mode != ModeProvider || got.Source != modeSourceAuth {
+		t.Fatalf("storage must resolve before the default: %+v", got)
+	}
+	got = resolveAuthMode(nil, nil, []byte(`{"api_key":"sk-ok"}`), ModeProvider)
+	if got.Invalid || got.Mode != ModeProvider || got.Source != modeSourceDefault {
+		t.Fatalf("a missing mode must use the plugin default: %+v", got)
+	}
+	got = resolveAuthMode(nil, nil, []byte(`{"mode":" CLI"}`), ModeCLI)
+	if !got.Invalid {
+		t.Fatalf("whitespace or case variants must not be normalized: %+v", got)
+	}
+}
+
 func TestResolveKeyValidatesEverySource(t *testing.T) {
 	if key, err := resolveKey(map[string]string{"api_key": "sk-ok"}, map[string]any{"api_key": "sk-other"}, nil); err != nil || key != "sk-ok" {
 		t.Fatalf("attributes must win: %q %v", key, err)

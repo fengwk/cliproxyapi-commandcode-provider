@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -288,6 +290,137 @@ func TestNonChatCatalogEntriesNotPublishedOrRoutable(t *testing.T) {
 	}
 	if _, ok := m.lookupFacts(m.config(), "system-only"); ok {
 		t.Fatalf("a non-chat entry must not be routable")
+	}
+}
+
+func TestManualModelEligibilityMatchesLookup(t *testing.T) {
+	// A provider-only modality is valid metadata but cannot be routed by CLI.
+	cli := testManager(ModeCLI, ManualModel{ID: "media-model", InputModalities: []string{"audio"}})
+	models := cli.publishedModels(cli.config())
+	for _, model := range models {
+		if model.ID == "commandcode/media-model" {
+			t.Fatalf("cli must not publish a non text/image manual model")
+		}
+	}
+	if _, ok := cli.lookupFacts(cli.config(), "media-model"); ok {
+		t.Fatalf("cli lookup must reject the same manual model")
+	}
+	// Provider routing requires a proven endpoint and can use the broader modality.
+	provider := testManager(ModeProvider, ManualModel{ID: "media-model", Protocol: "openai", InputModalities: []string{"audio"}})
+	if _, ok := provider.lookupFacts(provider.config(), "media-model"); !ok {
+		t.Fatalf("provider lookup must accept a declared endpoint")
+	}
+	found := false
+	for _, model := range provider.publishedModels(provider.config()) {
+		if model.ID == "commandcode/media-model" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("provider publication must match lookup")
+	}
+	// A manual model with neither protocol nor catalog endpoint is not selectable.
+	undeclared := testManager(ModeProvider, ManualModel{ID: "no-endpoint"})
+	for _, model := range undeclared.publishedModels(undeclared.config()) {
+		if model.ID == "commandcode/no-endpoint" {
+			t.Fatalf("an unproven provider endpoint must stay hidden")
+		}
+	}
+	if _, ok := undeclared.lookupFacts(undeclared.config(), "no-endpoint"); ok {
+		t.Fatalf("lookup must hide the same unproven endpoint")
+	}
+}
+
+func TestAuthModeDoesNotMutateSharedConfig(t *testing.T) {
+	m := testManager(ModeCLI)
+	request, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{"mode": "provider"},
+	})
+	raw, err := m.handleModelsForAuth(request)
+	if err != nil {
+		t.Fatalf("model discovery must answer: %v", err)
+	}
+	env := decodeEnvelope(t, raw)
+	if !env.OK {
+		t.Fatalf("provider auth discovery must succeed: %+v", env.Error)
+	}
+	var response pluginapi.ModelResponse
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatalf("model response must decode: %v", err)
+	}
+	if len(response.Models) == 0 {
+		t.Fatalf("provider auth must publish a catalog even when the plugin default is cli")
+	}
+	if m.config().Mode != ModeCLI {
+		t.Fatalf("discovery must not change the shared default mode")
+	}
+	// A second credential with an illegal mode must fail without changing the first result's source.
+	bad, _ := json.Marshal(map[string]any{"metadata": map[string]any{"mode": "auto"}})
+	raw, err = m.handleModelsForAuth(bad)
+	if err != nil {
+		t.Fatalf("invalid discovery must still return an envelope: %v", err)
+	}
+	env = decodeEnvelope(t, raw)
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_auth_mode" {
+		t.Fatalf("illegal auth mode must fail closed: %+v", env.Error)
+	}
+	if m.config().Mode != ModeCLI {
+		t.Fatalf("a failed resolution must not change the shared mode")
+	}
+}
+
+func TestProviderAuthDiscoversProviderOnlyModel(t *testing.T) {
+	// The plugin default stays CLI. Provider auth must still refresh and publish
+	// a model that exists only in the provider catalog.
+	host := &fakeHost{}
+	host.handler = func(method string, payload []byte) (any, error) {
+		if strings.Contains(string(payload), "sk-") {
+			t.Fatalf("anonymous catalog refresh must not carry a credential")
+		}
+		switch method {
+		case pluginabi.MethodHostHTTPOperationOpen:
+			return map[string]string{"operation_id": "op-1"}, nil
+		case pluginabi.MethodHostHTTPDo:
+			return httpOKResult(`{"data":[{"id":"provider-only-model","supported_endpoints":["/messages"]}]}`, nil), nil
+		default:
+			return nil, nil
+		}
+	}
+	m := host.manager()
+	m.setConfig(Config{Mode: ModeCLI, BaseURL: "http://127.0.0.1:9"})
+	request, _ := json.Marshal(map[string]any{
+		"metadata":         map[string]any{"mode": "provider"},
+		"host_callback_id": "cb-1",
+	})
+	raw, err := m.handleModelsForAuth(request)
+	if err != nil {
+		t.Fatalf("provider discovery must answer: %v", err)
+	}
+	env := decodeEnvelope(t, raw)
+	if !env.OK {
+		t.Fatalf("provider discovery must succeed: %+v", env.Error)
+	}
+	var response pluginapi.ModelResponse
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatalf("model response must decode: %v", err)
+	}
+	found := false
+	for _, model := range response.Models {
+		if model.ID == "commandcode/provider-only-model" {
+			found = true
+		}
+		if model.ID == "commandcode/minimax/minimax-m3-free" {
+			t.Fatalf("a cli-only model must not be published for provider auth")
+		}
+	}
+	if !found {
+		t.Fatalf("provider-only model must be published for provider auth")
+	}
+	if !host.called(pluginabi.MethodHostHTTPDo) {
+		t.Fatalf("provider auth must refresh the anonymous catalog")
+	}
+	if m.config().Mode != ModeCLI {
+		t.Fatalf("provider discovery must not change the shared cli default")
 	}
 }
 

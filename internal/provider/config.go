@@ -142,7 +142,7 @@ func parseConfig(configYAML []byte) (Config, error) {
 		seenModels[id] = true
 		cfg.Models = append(cfg.Models, id)
 	}
-	models, err := normalizeManualModels(cfg.Mode, raw.ManualModels)
+	models, err := normalizeManualModels(raw.ManualModels)
 	if err != nil {
 		return Config{}, err
 	}
@@ -150,12 +150,13 @@ func parseConfig(configYAML []byte) (Config, error) {
 	return cfg, nil
 }
 
-// normalizeManualModels validates explicit model registration. Provider mode
-// requires a declared protocol endpoint; CLI mode accepts an optional protocol
-// that does not change the wire. Every list entry is validated strictly so an
-// invalid modality, effort, blank, oversize or duplicate value is reported
-// rather than silently dropped.
-func normalizeManualModels(mode Mode, raw []ManualModel) ([]ManualModel, error) {
+// normalizeManualModels validates explicit model registration independently of
+// the plugin default mode. Protocol and modality membership stay strict, but a
+// missing protocol or a provider-only modality is stored and filtered later by
+// the credential mode that actually routes the model. Every list entry is
+// validated strictly so an invalid modality, effort, blank, oversize or
+// duplicate value is reported rather than silently dropped.
+func normalizeManualModels(raw []ManualModel) ([]ManualModel, error) {
 	if len(raw) > maxManualModels {
 		return nil, fmt.Errorf("manual-models accepts at most %d entries", maxManualModels)
 	}
@@ -176,13 +177,11 @@ func normalizeManualModels(mode Mode, raw []ManualModel) ([]ManualModel, error) 
 				return nil, fmt.Errorf("manual-models protocol must be openai, claude or openai-response")
 			}
 			protocol = strings.ToLower(protocol)
-		} else if mode == ModeProvider {
-			return nil, fmt.Errorf("manual-models in provider mode require an explicit protocol endpoint")
 		}
 		if item.ContextWindow < 0 || item.MaxOutputTokens < 0 {
 			return nil, fmt.Errorf("manual-models token limits must not be negative")
 		}
-		modalities, errModalities := normalizeModalities(mode, item.InputModalities)
+		modalities, errModalities := normalizeModalities(item.InputModalities)
 		if errModalities != nil {
 			return nil, errModalities
 		}
@@ -202,23 +201,26 @@ func normalizeManualModels(mode Mode, raw []ManualModel) ([]ManualModel, error) 
 	return models, nil
 }
 
-// allowedModality is the reviewed input-modality enum. CLI mode only carries
-// text/image (the CLI wire's confirmed set); provider mode additionally accepts
-// the broader public enum. Case is normalized before this check.
-func allowedModality(mode Mode, token string) bool {
+// allowedModality is the reviewed input-modality enum shared by both transports.
+// CLI routing later hides audio/video/pdf/file; that is an execution filter,
+// not a reason to reject the shared manual-model document.
+func allowedModality(token string) bool {
 	switch token {
-	case "text", "image":
+	case "text", "image", "audio", "video", "pdf", "file":
 		return true
-	case "audio", "video", "pdf", "file":
-		return mode == ModeProvider
 	default:
 		return false
 	}
 }
 
+// cliModality reports whether a modality is part of the confirmed CLI wire.
+func cliModality(token string) bool {
+	return token == "text" || token == "image"
+}
+
 // normalizeModalities validates the input-modality list: each entry must be a
 // non-empty, bounded, control-free enum member, with no duplicates.
-func normalizeModalities(mode Mode, values []string) ([]string, error) {
+func normalizeModalities(values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
@@ -232,7 +234,7 @@ func normalizeModalities(mode Mode, values []string) ([]string, error) {
 		if token == "" || token != strings.TrimSpace(token) || len(token) > maxTokenLength || strings.IndexFunc(token, invalidNativeRune) >= 0 {
 			return nil, fmt.Errorf("manual-models input-modalities contains an invalid entry")
 		}
-		if !allowedModality(mode, token) {
+		if !allowedModality(token) {
 			return nil, fmt.Errorf("manual-models input-modalities contains an unsupported entry")
 		}
 		if seen[token] {

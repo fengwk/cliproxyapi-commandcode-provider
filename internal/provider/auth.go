@@ -17,7 +17,10 @@ var (
 	errMissingKey      = errors.New("selected auth has no api key")
 	errInvalidKey      = errors.New("selected auth has an invalid api key")
 	errUnsupportedPair = errors.New("unsupported protocol translation pair")
+	errInvalidAuthMode = errors.New("auth mode must be cli or provider")
 )
+
+const authModeField = "mode"
 
 // authRecord is the physical auth JSON understood by this provider.
 type authRecord struct {
@@ -33,7 +36,8 @@ type authRecord struct {
 }
 
 // metadataFields lists the non-secret native auth fields preserved in metadata.
-var metadataFields = []string{"type", "id", "label", "disabled", "weight", "prefix", "proxy_url"}
+// mode is included so a later reload can resolve the credential before storage.
+var metadataFields = []string{"type", "id", "label", "disabled", "weight", "prefix", "proxy_url", authModeField}
 
 // parseAuth recognizes a CommandCode physical auth record and maps it to host
 // auth data. The stable ID mirrors the host path-based identity (file name).
@@ -50,6 +54,10 @@ func parseAuth(req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, err
 		(record.Type != ProviderID && record.Provider != ProviderID) {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
+	mode, modePresent, errMode := modeFromMap(raw)
+	if errMode != nil {
+		return pluginapi.AuthParseResponse{}, errInvalidAuthMode
+	}
 	if record.APIKey == "" {
 		return pluginapi.AuthParseResponse{}, errors.New("commandcode auth record has no api key")
 	}
@@ -63,6 +71,13 @@ func parseAuth(req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, err
 	if id == "" {
 		return pluginapi.AuthParseResponse{}, errors.New("commandcode auth record has no stable id")
 	}
+	metadata := nativeMetadata(raw)
+	if modePresent {
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata[authModeField] = string(mode)
+	}
 	return pluginapi.AuthParseResponse{
 		Handled: true,
 		Auth: pluginapi.AuthData{
@@ -74,7 +89,7 @@ func parseAuth(req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, err
 			ProxyURL:    record.ProxyURL,
 			Disabled:    record.Disabled,
 			StorageJSON: req.RawJSON,
-			Metadata:    nativeMetadata(raw),
+			Metadata:    metadata,
 			Attributes:  map[string]string{"api_key": record.APIKey},
 		},
 	}, nil
@@ -174,6 +189,108 @@ func isSafeAPIKey(raw string) bool {
 		}
 	}
 	return true
+}
+
+// modeSource names where a resolved credential mode came from.
+type modeSource string
+
+const (
+	modeSourceAuth    modeSource = "auth"
+	modeSourceDefault modeSource = "default"
+)
+
+// authModeResult is one strict mode resolution. Present means the chosen source
+// contained the field; Invalid means that value cannot be used.
+type authModeResult struct {
+	Mode    Mode
+	Source  modeSource
+	Present bool
+	Invalid bool
+}
+
+// resolveAuthMode applies Metadata > Attributes > StorageJSON > fallback.
+// A present value with the wrong type, an empty value, or an illegal value
+// fails closed and is never replaced by a later source.
+func resolveAuthMode(metadata map[string]any, attributes map[string]string, storage []byte, fallback Mode) authModeResult {
+	if result, ok := modeFromMetadata(metadata); ok {
+		return result
+	}
+	if result, ok := modeFromAttributes(attributes); ok {
+		return result
+	}
+	if result, ok := modeFromStorage(storage); ok {
+		return result
+	}
+	return authModeResult{Mode: fallback, Source: modeSourceDefault, Present: false}
+}
+
+func modeFromMetadata(metadata map[string]any) (authModeResult, bool) {
+	if metadata == nil {
+		return authModeResult{}, false
+	}
+	value, ok := metadata[authModeField]
+	if !ok {
+		return authModeResult{}, false
+	}
+	return classifyModeValue(value), true
+}
+
+func modeFromAttributes(attributes map[string]string) (authModeResult, bool) {
+	if attributes == nil {
+		return authModeResult{}, false
+	}
+	value, ok := attributes[authModeField]
+	if !ok {
+		return authModeResult{}, false
+	}
+	return classifyModeValue(value), true
+}
+
+func modeFromStorage(storage []byte) (authModeResult, bool) {
+	if len(storage) == 0 {
+		return authModeResult{}, false
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(storage, &raw); err != nil {
+		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}, true
+	}
+	encoded, ok := raw[authModeField]
+	if !ok {
+		return authModeResult{}, false
+	}
+	var value any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}, true
+	}
+	return classifyModeValue(value), true
+}
+
+func modeFromMap(raw map[string]any) (Mode, bool, error) {
+	value, ok := raw[authModeField]
+	if !ok {
+		return "", false, nil
+	}
+	result := classifyModeValue(value)
+	if result.Invalid {
+		return "", true, errInvalidAuthMode
+	}
+	return result.Mode, true, nil
+}
+
+func classifyModeValue(value any) authModeResult {
+	text, ok := value.(string)
+	if !ok {
+		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}
+	}
+	switch Mode(strings.ToLower(strings.TrimSpace(text))) {
+	case ModeCLI, ModeProvider:
+		if text != strings.TrimSpace(text) || text != strings.ToLower(text) {
+			return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}
+		}
+		return authModeResult{Mode: Mode(text), Source: modeSourceAuth, Present: true}
+	default:
+		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}
+	}
 }
 
 // authDisabled reports whether host metadata marks the credential disabled.
