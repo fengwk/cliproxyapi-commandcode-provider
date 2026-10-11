@@ -72,6 +72,6 @@ UI 中文、无框架/CDN/浏览器持久密钥、纯文本截断+title、支持
 
 make test = go vet/test + node UI tests；race；native c-shared build；真实 CPA v8.0.23 本地 mock 三协议两 mode/stream 矩阵、wire order、quota、401/402/403/422/429/截断/取消/多 key 亲和。
 
-混合模式集成计划覆盖不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改、重启、旧记录默认值、显式 mode 不受默认值改变、非法模式不发上游、foreign auth 禁止修改。这些用例即将完成，本文不把它们计为已通过。
+混合模式集成覆盖不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改及重启持久化、旧记录默认值、显式 mode 不受默认值改变、非法模式不发上游、foreign auth 禁止修改。
 
 开发提交留在 worktree 分支。Coder 不 push/tag/release，不操作 main。

@@ -80,6 +80,8 @@ plugins:
 #   GET  /v0/resource/plugins/cliproxyapi-commandcode-provider/ui        (public)
 #   POST /v0/management/plugins/cliproxyapi-commandcode-provider/keys
 #   GET  /v0/management/plugins/cliproxyapi-commandcode-provider/keys
+#   PATCH /v0/management/plugins/cliproxyapi-commandcode-provider/keys
+#     Body: {"auth_index":"<index from keys>","mode":"provider"}
 #   GET  /v0/management/plugins/cliproxyapi-commandcode-provider/settings
 #   POST /v0/management/plugins/cliproxyapi-commandcode-provider/validate
 #

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -260,11 +261,10 @@ func (m *Manager) importKeys(body []byte) ([]byte, error) {
 		return managementJSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 	}
 	var req importRequest
-	fields, errDecode := decodeStrictObject(body, &req)
-	if errDecode != nil {
+	if err := decodeStrictObject(body, &req, "keys", "label", "mode"); err != nil {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 	}
-	mode, errMode := requestedImportMode(fields, req.Mode, m.config().Mode)
+	mode, errMode := requestedImportMode(req.Mode, m.config().Mode)
 	if errMode != nil {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid mode"})
 	}
@@ -324,8 +324,8 @@ func (m *Manager) importKeys(body []byte) ([]byte, error) {
 
 // requestedImportMode treats a missing field as the plugin default. An explicit
 // null, number, empty string or illegal mode is rejected before any write.
-func requestedImportMode(fields map[string]json.RawMessage, raw json.RawMessage, fallback Mode) (Mode, error) {
-	if _, ok := fields["mode"]; !ok {
+func requestedImportMode(raw json.RawMessage, fallback Mode) (Mode, error) {
+	if len(raw) == 0 {
 		return fallback, nil
 	}
 	var value any
@@ -333,19 +333,6 @@ func requestedImportMode(fields map[string]json.RawMessage, raw json.RawMessage,
 		return "", errInvalidAuthMode
 	}
 	result := classifyModeValue(value)
-	if result.Invalid {
-		return "", errInvalidAuthMode
-	}
-	return result.Mode, nil
-}
-
-// importMode accepts an omitted mode as the plugin default. An explicit empty
-// or illegal mode is rejected before any credential is written.
-func importMode(raw string, fallback Mode) (Mode, error) {
-	if raw == "" {
-		return fallback, nil
-	}
-	result := classifyModeValue(raw)
 	if result.Invalid {
 		return "", errInvalidAuthMode
 	}
@@ -365,13 +352,14 @@ func (m *Manager) patchKeyMode(body []byte) ([]byte, error) {
 		return managementJSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 	}
 	var req patchModeRequest
-	if _, err := decodeStrictObject(body, &req); err != nil || strings.TrimSpace(req.AuthIndex) == "" {
+	if err := decodeStrictObject(body, &req, "auth_index", "mode"); err != nil || strings.TrimSpace(req.AuthIndex) == "" {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid mode patch"})
 	}
-	mode, errMode := importMode(req.Mode, "")
-	if errMode != nil || req.Mode == "" {
+	resolved := classifyModeValue(req.Mode)
+	if resolved.Invalid {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid mode patch"})
 	}
+	mode := resolved.Mode
 
 	m.importMu.Lock()
 	defer m.importMu.Unlock()
@@ -455,7 +443,7 @@ func patchModeJSON(raw json.RawMessage, mode Mode) (json.RawMessage, error) {
 // safeAuthFileName accepts only a flat .json file name. Paths, hidden names
 // and non-ASCII names cannot be selected for a mode rewrite.
 func safeAuthFileName(name string) bool {
-	if name == "" || len(name) > maxNameLength || !strings.HasSuffix(name, authFileSuffix) {
+	if name == "" || len(name) > maxNameLength || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, authFileSuffix) {
 		return false
 	}
 	base := strings.TrimSuffix(name, authFileSuffix)
@@ -470,23 +458,21 @@ func safeAuthFileName(name string) bool {
 	return !strings.Contains(name, "/") && !strings.Contains(name, "\\")
 }
 
-// decodeStrictObject requires one JSON object, unique root keys, no trailing
-// payload, and then a DisallowUnknownFields decode into out.
-func decodeStrictObject(body []byte, out any) (map[string]json.RawMessage, error) {
+// decodeStrictObject requires one object with unique, exact field names.
+// Unlike the struct decoder, the name check does not accept case variants.
+func decodeStrictObject(body []byte, out any, allowedFields ...string) error {
 	fields, err := objectFields(body)
 	if err != nil {
-		return nil, err
+		return err
+	}
+	for field := range fields {
+		if !slices.Contains(allowedFields, field) {
+			return fmt.Errorf("unknown json field")
+		}
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(out); err != nil {
-		return nil, err
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("trailing json")
-	}
-	return fields, nil
+	return dec.Decode(out)
 }
 
 // objectFields reads one root object and rejects a repeated key. Values stay

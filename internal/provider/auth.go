@@ -199,12 +199,10 @@ const (
 	modeSourceDefault modeSource = "default"
 )
 
-// authModeResult is one strict mode resolution. Present means the chosen source
-// contained the field; Invalid means that value cannot be used.
+// authModeResult is one strict mode resolution. Invalid values never fall back.
 type authModeResult struct {
 	Mode    Mode
 	Source  modeSource
-	Present bool
 	Invalid bool
 }
 
@@ -221,7 +219,7 @@ func resolveAuthMode(metadata map[string]any, attributes map[string]string, stor
 	if result, ok := modeFromStorage(storage); ok {
 		return result
 	}
-	return authModeResult{Mode: fallback, Source: modeSourceDefault, Present: false}
+	return authModeResult{Mode: fallback, Source: modeSourceDefault}
 }
 
 func modeFromMetadata(metadata map[string]any) (authModeResult, bool) {
@@ -251,8 +249,8 @@ func modeFromStorage(storage []byte) (authModeResult, bool) {
 		return authModeResult{}, false
 	}
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(storage, &raw); err != nil {
-		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}, true
+	if err := json.Unmarshal(storage, &raw); err != nil || raw == nil {
+		return authModeResult{Invalid: true, Source: modeSourceAuth}, true
 	}
 	encoded, ok := raw[authModeField]
 	if !ok {
@@ -260,7 +258,7 @@ func modeFromStorage(storage []byte) (authModeResult, bool) {
 	}
 	var value any
 	if err := json.Unmarshal(encoded, &value); err != nil {
-		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}, true
+		return authModeResult{Invalid: true, Source: modeSourceAuth}, true
 	}
 	return classifyModeValue(value), true
 }
@@ -280,16 +278,13 @@ func modeFromMap(raw map[string]any) (Mode, bool, error) {
 func classifyModeValue(value any) authModeResult {
 	text, ok := value.(string)
 	if !ok {
-		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}
+		return authModeResult{Invalid: true, Source: modeSourceAuth}
 	}
-	switch Mode(strings.ToLower(strings.TrimSpace(text))) {
+	switch Mode(text) {
 	case ModeCLI, ModeProvider:
-		if text != strings.TrimSpace(text) || text != strings.ToLower(text) {
-			return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}
-		}
-		return authModeResult{Mode: Mode(text), Source: modeSourceAuth, Present: true}
+		return authModeResult{Mode: Mode(text), Source: modeSourceAuth}
 	default:
-		return authModeResult{Invalid: true, Source: modeSourceAuth, Present: true}
+		return authModeResult{Invalid: true, Source: modeSourceAuth}
 	}
 }
 

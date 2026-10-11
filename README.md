@@ -107,8 +107,8 @@ v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.re
 
 - 管理界面（同源嵌入）：`GET /v0/resource/plugins/cliproxyapi-commandcode-provider/ui`
 - 列表：`GET .../keys` → `{files:[{name,auth_index,label,status,disabled,unavailable,success,failed,mode,mode_source,mode_error}]}`。`mode_source` 为 `auth`（记录内显式）或 `default`（采用 YAML 默认）。无法确定时 `mode=""`、`mode_source=""`、`mode_error=true`，不伪装成 `cli`；单条失败不阻断其他条目，响应不含 raw JSON、key 或路径。
-- 导入：`POST .../keys`，体 `{"keys":[...],"label":"...","mode":"cli"|"provider"}`。`mode` 可省略，省略时用 YAML 默认；UI 导入下拉默认选 CLI，并显式提交所选值，只作用于本次导入。非法、空或未知字段在零写入前拒绝。新凭据持久化该 `mode`。重复 key 仍 `skipped`，不改既有凭据模式。返回 `{imported,skipped,failed}`。
-- 修改模式：`PATCH .../keys`，体只能是 `{"auth_index":"...","mode":"cli"|"provider"}`（≤64KiB，无尾随 JSON）。`mode` 必须显式。只改该凭据的根级 `mode`，保留 `api_key`、`disabled`、`label`、`prefix`、`proxy_url`、`weight` 以及未知字段和精确 JSON 数字。只接受本 provider 的安全 flat `.json`；未知或外来 auth 为 404，读取或保存失败为 502，错误文案固定且不回显凭据。成功 `200`：`{auth_index, mode, mode_source:"auth"}`。
+- 导入：`POST .../keys`，体如 `{"keys":["replace-with-commandcode-key"],"label":"...","mode":"provider"}`。`mode` 可选 `cli` 或 `provider`，省略时用 YAML 默认；UI 导入下拉默认选 CLI，并显式提交所选值，只作用于本次导入。非法、空、重复、未知字段或尾随 JSON 在零写入前拒绝。新凭据持久化该 `mode`。重复 key 仍 `skipped`，不改既有凭据模式。返回 `{imported,skipped,failed}`。
+- 修改模式：`PATCH .../keys`，体如 `{"auth_index":"...","mode":"provider"}`（≤64KiB，无重复字段或尾随 JSON）。只接受 `auth_index` 与 `mode` 两个字段，后者必须显式为 `cli` 或 `provider`。只改该凭据的根级 `mode`，保留 `api_key`、`disabled`、`label`、`prefix`、`proxy_url`、`weight` 以及未知字段和精确 JSON 数字。只接受本 provider 的安全 flat `.json`；未知或外来 auth 为 404，读取或保存失败为 502，错误文案固定且不回显凭据。成功 `200`：`{auth_index, mode, mode_source:"auth"}`。
 - UI 每行有模式下拉和“保存模式”。保存后重新 GET，确认该条 `mode` 为目标且 `mode_source=auth`；未确认不等于已生效。非法或不可读显示错误，不伪装成 CLI。错误不清空列表或其他凭据。设置区的“旧凭据默认模式”只展示 YAML 默认，不是所有凭据的模式。
 - 删除：使用 **CPA 原生**认证文件管理路由 `DELETE /v8/management/credentials?name=<file>`；插件**没有** `host.auth.delete`。
 - Settings（只读）：`GET .../settings`。`mode` 与 `default_mode` 都是旧凭据默认值；另有 `mode_scope:"auth"`、`catalog`（该默认值下的目录状态）、`catalogs.cli` / `catalogs.provider`，以及 `base_url`、`zdr`、`cli_version`、`manual-models`。
@@ -222,7 +222,7 @@ make integration  # 真实宿主测试，必须设置 CPA_BINARY=/abs/path/cli-p
 
 - `make integration` 使用 `-tags=integration`，**要求** `CPA_BINARY` 指向真实 CPA v8 宿主二进制；缺失时**硬失败**（退出码 2），绝不静默跳过。
 - 集成矩阵：2 模式（`cli`/`provider`）× 3 客户端协议 × 3 模型家族 × 流式/非流式 = **36 cell**，并额外覆盖 header 顺序（raw TCP 抓包，不用 `httptest` 的 header map 当顺序证据）、usage/工具/reasoning、亲和与 429/402 故障转移、unsupported 语义零上游调用、ZDR 422 不降级、key 导入/重启/删除/quota、UTF-8/EOF/错误/取消/关停。
-- 每凭据混合模式的集成计划覆盖：不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改、重启后旧记录仍用默认值且显式 mode 不变、非法模式不发上游。这些用例即将完成，本文不把它们计为已通过。
+- 每凭据混合模式集成覆盖：不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改及重启持久化、旧记录采用默认值且显式 mode 不受默认值改变、非法模式不发上游、外来 auth 禁止修改。
 - CI（`.github/workflows/ci.yml`）：`go vet` / `go test` / `go test -race` / Node UI 测试 / 三平台原生构建 / 真实宿主集成（`v8.0.23`，通过可复用 `real-host.yml`）。
 - 发布**仅人工**：`.github/workflows/release.yml` 由人工 `vX.Y.Z` tag 或手动 `workflow_dispatch` 触发；仓库内**没有** auto-release、自动 push、自动合并或定时改代码的工作流。发布前对准确 tag 执行 test/race/static/真实宿主集成门禁，再原生构建三平台；核验 ZIP 内容、动态库架构、metadata 版本/SDK/提交及 SHA256 后，先建草稿、上传全部资产才正式发布，并使用 `gh release create --verify-tag`（从不创建 tag）。
 

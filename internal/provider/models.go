@@ -564,12 +564,11 @@ func chatEndpoints(endpoints []string) bool {
 // this config. Provider mode never consults the embedded index directly: a live
 // snapshot that omitted the model stays omitted.
 func (m *Manager) catalogModel(cfg Config, index catalogIndex, native string) (publicModel, bool) {
-	var models []publicModel
-	if cfg.Mode == ModeProvider {
-		models, _ = m.catalogSnapshot(cfg)
-	} else {
-		models = embeddedPublicModels(index)
+	if cfg.Mode != ModeProvider {
+		model, ok := index.public[native]
+		return model, ok && chatCapable(model)
 	}
+	models, _ := m.catalogSnapshot(cfg)
 	for _, model := range models {
 		if nativeModelID(model.ID) != native || !chatCapable(model) {
 			continue

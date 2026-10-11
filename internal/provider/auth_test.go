@@ -101,6 +101,10 @@ func TestResolveAuthModePriority(t *testing.T) {
 	if !got.Invalid {
 		t.Fatalf("whitespace or case variants must not be normalized: %+v", got)
 	}
+	got = resolveAuthMode(nil, nil, []byte(`null`), ModeCLI)
+	if !got.Invalid {
+		t.Fatalf("a null storage record must not be treated as a legacy object: %+v", got)
+	}
 }
 
 func TestResolveKeyValidatesEverySource(t *testing.T) {

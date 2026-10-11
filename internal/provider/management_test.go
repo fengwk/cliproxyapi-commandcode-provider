@@ -232,6 +232,8 @@ func TestImportKeysPersistsExplicitModeAndSkipsExisting(t *testing.T) {
 		[]byte(`{"keys":["fresh"],"mode":"provider","mode":"cli"}`),
 		[]byte(`{"keys":["a"],"keys":["b"]}`),
 		[]byte(`{"keys":["fresh"],"extra":1}`),
+		[]byte(`{"keys":["fresh"],"Mode":"provider"}`),
+		[]byte(`{"keys":["fresh"],"mode":"cli","MODE":"provider"}`),
 		[]byte(`{"keys":["fresh"]}{"mode":"provider"}`),
 	}
 	for _, raw := range rejected {
@@ -368,6 +370,8 @@ func TestPatchKeyModePreservesUnknownJSON(t *testing.T) {
 		[]byte(`{"auth_index":"auth-1","auth_index":"auth-2","mode":"provider"}`),
 		[]byte(`{"auth_index":"auth-1","mode":"provider","mode":"cli"}`),
 		[]byte(`{"auth_index":"auth-1","mode":"provider","extra":1}`),
+		[]byte(`{"auth_index":"auth-1","Mode":"provider"}`),
+		[]byte(`{"auth_index":"auth-1","mode":"cli","MODE":"provider"}`),
 		[]byte(`{"auth_index":"auth-1","mode":"provider"}{}`),
 	} {
 		env = managementCall(t, m, http.MethodPatch, managementPath+keysRoute, raw)
@@ -401,6 +405,70 @@ func TestPatchRejectsUnsafeFileNameWithoutSave(t *testing.T) {
 	env := managementCall(t, m, http.MethodPatch, managementPath+keysRoute, []byte(`{"auth_index":"auth-1","mode":"provider"}`))
 	if env.StatusCode != http.StatusBadGateway || saves != 0 || strings.Contains(string(env.Body), "owned") {
 		t.Fatalf("an unsafe auth file must not be rewritten: %+v saves=%d", env, saves)
+	}
+}
+
+func TestPatchKeyModeGuardsSnapshotAndHostErrors(t *testing.T) {
+	// A stale identity, ambiguous file or host failure must never become a
+	// successful rewrite or leak the host's credential-bearing error.
+	const secret = "sk-host-error-secret"
+	for _, tc := range []struct {
+		name      string
+		file      string
+		index     string
+		raw       string
+		fail      string
+		wantSaves int
+	}{
+		{name: "mismatched name", file: "other.json"},
+		{name: "mismatched index", index: "other-auth"},
+		{name: "hidden file", file: ".owned.json"},
+		{name: "foreign JSON", raw: `{"type":"other","api_key":"` + secret + `"}`},
+		{name: "duplicate mode", raw: `{"type":"commandcode","api_key":"` + secret + `","mode":"cli","mode":"provider"}`},
+		{name: "list failure", fail: pluginabi.MethodHostAuthList},
+		{name: "get failure", fail: pluginabi.MethodHostAuthGet},
+		{name: "save failure", fail: pluginabi.MethodHostAuthSave, wantSaves: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pluginapi.HostAuthGetResponse{
+				Name: "owned.json", AuthIndex: "auth-1",
+				JSON: json.RawMessage(`{"type":"commandcode","api_key":"` + secret + `","mode":"cli"}`),
+			}
+			if tc.file != "" {
+				got.Name = tc.file
+			}
+			if tc.index != "" {
+				got.AuthIndex = tc.index
+			}
+			if tc.raw != "" {
+				got.JSON = json.RawMessage(tc.raw)
+			}
+			saves := 0
+			host := &fakeHost{}
+			host.handler = func(method string, _ []byte) (any, error) {
+				if method == pluginabi.MethodHostAuthSave {
+					saves++
+				}
+				if method == tc.fail {
+					return nil, &HostError{Method: method, Code: "host_call_failed", Message: secret}
+				}
+				switch method {
+				case pluginabi.MethodHostAuthList:
+					return map[string]any{"files": []pluginapi.HostAuthFileEntry{
+						{Name: "owned.json", AuthIndex: "auth-1", Provider: ProviderID},
+					}}, nil
+				case pluginabi.MethodHostAuthGet:
+					return got, nil
+				default:
+					return nil, nil
+				}
+			}
+			env := managementCall(t, host.manager(), http.MethodPatch, managementPath+keysRoute,
+				[]byte(`{"auth_index":"auth-1","mode":"provider"}`))
+			if env.StatusCode != http.StatusBadGateway || saves != tc.wantSaves || strings.Contains(string(env.Body), secret) {
+				t.Fatalf("unsafe update must fail with a fixed response: %+v saves=%d", env, saves)
+			}
+		})
 	}
 }
 
