@@ -53,6 +53,7 @@ test: vet
 static:
 	go test ./tests/static/...
 	bash scripts/test-package-plugin.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/static/release_assets_test.py
 
 race:
 	go test -race ./...
