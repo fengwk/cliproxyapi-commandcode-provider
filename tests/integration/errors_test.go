@@ -167,3 +167,64 @@ func TestGracefulShutdown(t *testing.T) {
 		t.Fatal("host did not exit after interrupt")
 	}
 }
+
+// TestPreStreamErrorKeepsStatusAndHidesCredentials proves a legitimate upstream
+// error status survives the preflight failure envelope exactly, and that neither
+// the client body nor the captured host stdout/stderr leaks credential material.
+func TestPreStreamErrorKeepsStatusAndHidesCredentials(t *testing.T) {
+	h := newHarness(t, modeCLI)
+	if status, _ := h.importKeys(t, []string{keyAlpha}, "status"); status != http.StatusOK {
+		t.Fatalf("import keys failed")
+	}
+	const upstreamStatus = 409
+	session := "status-409"
+	h.wire.reset()
+	h.wire.failNext(markerFor(session), upstreamStatus, "conflict")
+
+	body, err := clientChat.request(familyChatResp, session, false)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	status, raw, err := h.rawRequest(http.MethodPost, clientChat.path, body, clientChat.headers(session))
+	if err != nil {
+		t.Fatalf("client request failed: %v", err)
+	}
+	if status != upstreamStatus {
+		t.Errorf("client status = %d, want the upstream status %d preserved", status, upstreamStatus)
+	}
+	assertNoCredentialLeak(t, "client body", string(raw))
+	// The host config points at the fake harness credentials only; a real
+	// deployment's secrets can never appear because hostEnv never inherits them.
+	assertNoCredentialLeak(t, "host stdout", h.stdout.String())
+	assertNoCredentialLeak(t, "host stderr", h.stderr.String())
+}
+
+// TestHostEnvOmitsCredentialInheritance proves the child host environment is
+// built from an explicit allowlist and cannot inherit real upstream or
+// management credentials from the developer/CI shell.
+func TestHostEnvOmitsCredentialInheritance(t *testing.T) {
+	env := hostEnv("/tmp/fake-home")
+	joined := strings.Join(env, "\n")
+	for _, forbidden := range []string{
+		"MANAGEMENT_PASSWORD=", "CPA_HOME=", "COMMANDCODE", "COMMAND_CODE",
+		"API_KEY=", "ANTHROPIC", "OPENAI", "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("host env must not contain %q", forbidden)
+		}
+	}
+	for _, required := range []string{"HOME=/tmp/fake-home", "NO_PROXY=*", "no_proxy=*"} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("host env must contain %q", required)
+		}
+	}
+}
+
+func assertNoCredentialLeak(t *testing.T, where, text string) {
+	t.Helper()
+	for _, secret := range []string{keyAlpha, keyBeta, keyGamma, mgmtKey} {
+		if strings.Contains(text, secret) {
+			t.Errorf("%s leaked the synthetic credential %q", where, secret)
+		}
+	}
+}

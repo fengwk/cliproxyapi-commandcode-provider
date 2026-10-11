@@ -44,8 +44,9 @@ plugins:
       # The mode is a single global choice per plugin instance; it is shown
       # read-only in the management UI and cannot silently downgrade.
       mode: cli
-      # API authority ONLY. Do NOT append /alpha or /provider/v1 (or /v1); the
-      # plugin adds the versioned path itself. Production must use https.
+      # API authority (+ optional path prefix). Do NOT append the versioned
+      # path (/alpha, /provider/v1 or /v1); the plugin adds it. Production must
+      # use https.
       base-url: "https://api.commandcode.ai"
       # Zero Data Retention is opt-in and matches the stock CLI default of false.
       # true sends x-cmd-zdr: 1; a 422 cmd_zdr_no_providers is surfaced as-is and

@@ -53,8 +53,10 @@ plugins:
 
 ```bash
 make build        # 产物 dist/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib}
-make package      # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
+make package VERSION=0.1.0   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
 ```
+
+`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.1.0` 时归档为 `cliproxyapi-commandcode-provider_0.1.0_<goos>_<goarch>.zip`；不传则本地构建使用 `0.1.0-dev+<short-sha>`。发布由 tag 决定版本。
 
 把动态库放到 `<plugins.dir>/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib,dll}`。注意 Linux 产物依赖 glibc，**不适用于 musl/Alpine**。
 
@@ -75,7 +77,7 @@ plugins:
 ```
 
 - **`mode`**：`cli` 走 `/alpha/generate`；`provider` 走 `/provider/v1/*`。模式是每个插件实例的**单一全局选择**，只在管理页只读展示；无效配置保留旧快照，不产生半切换。
-- **`base-url`** 只写 API authority，**不要**附加 `/v1`、`/alpha` 或 `/provider/v1`，插件自行拼接版本化路径。生产必须使用 HTTPS；禁止 URL 中含 userinfo/query/fragment。
+- **`base-url`** 只写 API authority，可选带一个**路径前缀**（例如反向代理下的 `/commandcode`）；**不要**附加 `/v1`、`/alpha` 或 `/provider/v1`，插件在 authority+前缀之后自行拼接版本化路径。生产必须使用 HTTPS；禁止 URL 中含 userinfo/query/fragment。
 - **`zdr`** 默认 `false`（与原 CLI 一致）；`true` 时发送 `x-cmd-zdr: 1`，遇到 `422 cmd_zdr_no_providers` 原样上报，**不会撤掉 ZDR 再重试**。
 - **`models`** 只是白名单，不新增目录外模型。
 - **`manual-models`** 用于显式注册/覆盖模型：`{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}`，provider 模式必须声明受支持 endpoint（`openai`/`claude`/`openai-response`），上限 100 条、每条 id ≤ 200 字节。
@@ -157,7 +159,7 @@ Body: {"auth_index":"<来自 keys 列表的 index>"}
   2. RPC 解码不保留 `Retryable`，冷却/故障转移由宿主按自身策略决定。
   3. `host.stream.emit/close` 的错误是字符串，**流中（已输出内容后）的 402/429 无法让 CPA 的失败记录/冷却识别精确上游状态**。
   因此插件只在**返回成功流之前**做有界 preflight 以便尽量走失败 envelope；一旦已输出内容，只发送明确的协议错误，绝不自行换 key 重放。
-- **Observer v0.4.4 不能“自动兼容”**：宿主转 `UsageRecord` 时丢弃 TokenBreakdown，且 `commandcode + executorAdapter` 对 Observer 的 SDK 是未知 provider → `unclassified`。**即使插件 payload 完全正确，当前 Observer 的非零价格仍会显示未定价**。要获得非零可定价成本，需按设计文档独立修改 Observer 增加精确 cohort，**不修改 CPA 核心**。若保持 Observer v0.4.4 不变，只能承诺显示 token 与原始总量。
+- **Observer v0.4.4 不能“自动兼容”**：宿主转 `UsageRecord` 时丢弃 TokenBreakdown，且 `commandcode + executorAdapter` 对 Observer 的 SDK 是未知 provider → `unclassified`。**即使插件 payload 完全正确，当前 Observer 的非零价格仍会显示未定价**。要获得非零可定价成本，需按设计文档独立修改 Observer 增加精确 cohort（provider=`commandcode`、executor=`executorAdapter`、model namespace=`commandcode/`），**不修改 CPA 核心**；本仓库**不直接改 Observer**，该 cohort 更新仍待办。若保持 Observer v0.4.4 不变，只能承诺显示 token 与原始总量。
 - **合成 workspace 接受性**未知：是否影响上游 prompt/工具行为需要受控验证。
 - **无真实 usage / TTL / 缓存政策验证**：结构稳定与 session affinity 是措施，命中率与扣费不能离线保证。
 - 未测试的 CPA 版本不做支持承诺。

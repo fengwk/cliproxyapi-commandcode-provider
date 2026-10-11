@@ -159,6 +159,13 @@ func cliGenerateSlowNDJSON() []byte {
 	return []byte(b.String())
 }
 
+// cliPauseTurnNDJSON is a single upstream turn that ends with a pause_turn
+// finish: the plugin must accumulate its usage and continue the same logical
+// request, not surface a terminal success.
+func cliPauseTurnNDJSON() []byte {
+	return []byte(`{"type":"finish","finishReason":"pause_turn","rawFinishReason":"pause_turn","totalUsage":{"inputTokens":3,"outputTokens":1,"totalTokens":4,"inputTokenDetails":{"noCacheTokens":1,"cacheReadTokens":2,"cacheWriteTokens":0},"outputTokenDetails":{"reasoningTokens":0}}}` + "\n")
+}
+
 // chatStreamTruncated cuts an OpenAI Chat SSE stream before [DONE].
 func chatStreamTruncated(native string) []byte {
 	var b strings.Builder

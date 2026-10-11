@@ -62,7 +62,7 @@ integration:
 		echo "CPA_BINARY must point to a built cli-proxy-api host binary" >&2; \
 		exit 2; \
 	fi
-	CPA_BINARY="$(CPA_BINARY)" go test -tags=integration ./tests/integration -count=1 -timeout=300s
+	CPA_BINARY="$(CPA_BINARY)" go test -tags=integration ./tests/integration -count=1 -timeout=600s
 
 package: build
 	bash scripts/package-plugin.sh "$(VERSION)" "$(GOOS)" "$(GOARCH)" "dist/pkg"

@@ -154,36 +154,8 @@ func upstreamModel(call wireRequest) string {
 	return decoded.Model
 }
 
-// TestUnsupportedSemanticsMakeNoUpstreamCall proves the plugin rejects
-// losslessly-unconvertible client semantics locally: a 4xx before any upstream
-// request, never a silent drop or a downgraded attempt.
-func TestUnsupportedSemanticsMakeNoUpstreamCall(t *testing.T) {
-	cases := map[string]string{
-		"remote image url": fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/remote.png"}},{"type":"text","text":"look"}]}]}`, publicModel(familyChatResp)),
-		"multiple choices": fmt.Sprintf(`{"model":%q,"n":2,"messages":[{"role":"user","content":"hi"}]}`, publicModel(familyChatResp)),
-	}
-	for mode := range map[string]bool{modeCLI: true, modeProvider: true} {
-		mode := mode
-		t.Run("mode="+mode, func(t *testing.T) {
-			h := newHarness(t, mode)
-			if status, body := h.importKeys(t, []string{keyAlpha}, "unsupported-"+mode); status != http.StatusOK {
-				t.Fatalf("import keys status %d body %s", status, truncate(body, 300))
-			}
-			for name, payload := range cases {
-				t.Run(name, func(t *testing.T) {
-					h.wire.reset()
-					status, body := h.doJSON(t, http.MethodPost, clientChat.path, []byte(payload), nil)
-					if status < 400 || status > 499 {
-						t.Errorf("status = %d, want a local 4xx (body %s)", status, truncate(body, 200))
-					}
-					if len(inferenceCalls(h.wire.allCalls())) != 0 {
-						t.Errorf("unsupported request reached the upstream")
-					}
-				})
-			}
-		})
-	}
-}
+// TestUnsupportedSemanticsMakeNoUpstreamCall moved to unsupported_test.go so its
+// provider-passthrough cases can evolve without touching the matrix helpers.
 
 // TestStreamTruncationNoFakeSuccess proves an upstream stream that ends without
 // a terminal is never reported as a clean success, and the host keeps serving.
@@ -192,7 +164,11 @@ func TestStreamTruncationNoFakeSuccess(t *testing.T) {
 		mode := mode
 		t.Run("mode="+mode, func(t *testing.T) {
 			h := newHarness(t, mode)
-			if status, _ := h.importKeys(t, []string{keyAlpha}, "truncate-"+mode); status != http.StatusOK {
+			// The truncation legitimately cools the credential it used, so the
+			// recovery request below must be able to draw an independent,
+			// non-cooled credential; that is credential isolation, not a change
+			// to cross-request cooldown semantics.
+			if status, _ := h.importKeys(t, []string{keyAlpha, keyBeta, keyGamma}, "truncate-"+mode); status != http.StatusOK {
 				t.Fatalf("import keys failed")
 			}
 			h.wire.reset()
