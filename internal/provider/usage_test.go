@@ -251,6 +251,9 @@ func TestReasoningEffortPrefersMetadataThenBody(t *testing.T) {
 	if got := reasoningEffort(nil, translator.FormatClaude, []byte(`{"output_config":{"effort":"high"}}`)); got != "high" {
 		t.Errorf("claude output_config effort = %q, want high", got)
 	}
+	if got := reasoningEffort(map[string]any{"reasoning_effort": "high"}, translator.FormatClaude, []byte(`{"thinking":{"type":"disabled"}}`)); got != "none" {
+		t.Errorf("explicitly disabled thinking must remain disabled, got %q", got)
+	}
 	if got := reasoningEffort(nil, translator.FormatOpenAI, []byte(`{}`)); got != "" {
 		t.Errorf("absent effort = %q, want empty", got)
 	}

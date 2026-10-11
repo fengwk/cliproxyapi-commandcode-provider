@@ -487,6 +487,9 @@ func validateThinking(raw json.RawMessage, effort string, caps Capabilities) err
 	}
 	switch thinking.Type {
 	case "disabled":
+		if effort != "" && effort != "none" {
+			return invalidRequest("disabled thinking conflicts with the declared reasoning effort")
+		}
 		if !containsString(caps.ReasoningEfforts, "none") {
 			return unsupported("the model cannot be forced to disable thinking")
 		}

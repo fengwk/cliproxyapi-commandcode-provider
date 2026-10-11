@@ -115,6 +115,9 @@ func unsupportedTranslation() error {
 // falls back to the validated client body's protocol-specific field. The CLI
 // builder drops any effort the model does not legitimately support.
 func reasoningEffort(metadata map[string]any, client translator.Format, original []byte) string {
+	if client == translator.FormatClaude && gjson.GetBytes(original, "thinking.type").String() == "disabled" {
+		return "none"
+	}
 	if metadata != nil {
 		if value, ok := metadata["reasoning_effort"].(string); ok {
 			if trimmed := bounded(strings.TrimSpace(value)); trimmed != "" {

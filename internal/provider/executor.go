@@ -133,8 +133,10 @@ func (p *plan) prepareProvider(req rpcExecutorRequest) error {
 	if len(body) == 0 {
 		body = req.OriginalRequest
 	}
-	if errSemantics := rejectProviderSemantics(p.clientReq, body); errSemantics != nil {
-		return errSemantics
+	if p.clientReq != target || p.clientResp != target {
+		if errSemantics := rejectProviderSemantics(p.clientReq, body); errSemantics != nil {
+			return errSemantics
+		}
 	}
 	converted, errBody := buildProviderBody(req, p.clientReq, target, p.native, p.stream)
 	if errBody != nil {

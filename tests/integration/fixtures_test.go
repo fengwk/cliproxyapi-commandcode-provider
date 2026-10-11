@@ -144,7 +144,7 @@ func cliGenerateUnicodeNDJSON(text string) []byte {
 		panic(err)
 	}
 	return []byte("{\"type\":\"text-delta\",\"text\":" + string(raw) + "}\n" +
-		`{"type":"finish","finishReason":"stop","rawFinishReason":"end_turn","totalUsage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}` + "\n")
+		`{"type":"finish","finishReason":"stop","rawFinishReason":"end_turn","totalUsage":{"inputTokens":1,"outputTokens":1,"totalTokens":2,"inputTokenDetails":{"noCacheTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0},"outputTokenDetails":{"reasoningTokens":0}}}` + "\n")
 }
 
 // cliGenerateSlowNDJSON is a long, syntactically valid turn used for
@@ -155,7 +155,7 @@ func cliGenerateSlowNDJSON() []byte {
 	for i := 0; i < 200; i++ {
 		fmt.Fprintf(&b, "{\"type\":\"text-delta\",\"text\":\"chunk-%04d\"}\n", i)
 	}
-	b.WriteString(`{"type":"finish","finishReason":"stop","rawFinishReason":"end_turn","totalUsage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}` + "\n")
+	b.WriteString(`{"type":"finish","finishReason":"stop","rawFinishReason":"end_turn","totalUsage":{"inputTokens":1,"outputTokens":1,"totalTokens":2,"inputTokenDetails":{"noCacheTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0},"outputTokenDetails":{"reasoningTokens":0}}}` + "\n")
 	return []byte(b.String())
 }
 
@@ -178,12 +178,9 @@ func chatStreamTruncated(native string) []byte {
 // millisecond reset times, plus explicit account credit components.
 func quotaCreditsBody() []byte {
 	return []byte(`{
-  "monthly_credits": 100,
-  "purchased_credits": 20,
-  "free_credits": 5,
-  "total_credits": 125,
+  "credits": {"monthlyCredits": 100, "purchasedCredits": 20, "freeCredits": 5},
   "windowLimits": {
-    "five_hour": {"used": 25, "cap": 100, "resetAt": 1791729940000},
+    "fiveHour": {"used": 25, "cap": 100, "resetAt": 1791729940000},
     "weekly": {"used": 60, "cap": 200, "resetAt": 1792334740000}
   }
 }`)
@@ -191,7 +188,7 @@ func quotaCreditsBody() []byte {
 
 // quotaSubscriptionsBody is the synthetic plan payload.
 func quotaSubscriptionsBody() []byte {
-	return []byte(`{"subscriptions":[{"planId":"commandcode-go","status":"active","currentPeriodEnd":1792334740000}]}`)
+	return []byte(`{"success":true,"data":{"planId":"commandcode-go","status":"active","currentPeriodEnd":"2026-10-18T14:45:40Z"}}`)
 }
 
 // sse renders one unnamed Server-Sent Event with CRLF framing.

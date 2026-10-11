@@ -1048,4 +1048,3 @@ test("collectThemeTokens extracts only whitelisted properties", () => {
   assert.equal(tokens["--danger-color"], "#ff0000");
   assert.equal(tokens["--evil-secret"], undefined);
 });
-
