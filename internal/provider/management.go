@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/tidwall/sjson"
 
 	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/web"
 )
@@ -246,9 +247,9 @@ func (m *Manager) fillKeyMode(summary *keyFileEntry, entry pluginapi.HostAuthFil
 }
 
 type importRequest struct {
-	Keys  []string `json:"keys"`
-	Label string   `json:"label"`
-	Mode  *string  `json:"mode"`
+	Keys  []string        `json:"keys"`
+	Label string          `json:"label"`
+	Mode  json.RawMessage `json:"mode"`
 }
 
 // importKeys validates and deduplicates the whole input, then saves each new key
@@ -259,10 +260,11 @@ func (m *Manager) importKeys(body []byte) ([]byte, error) {
 		return managementJSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 	}
 	var req importRequest
-	if err := decodeStrictObject(body, &req); err != nil {
+	fields, errDecode := decodeStrictObject(body, &req)
+	if errDecode != nil {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 	}
-	mode, errMode := requestedImportMode(req.Mode, m.config().Mode)
+	mode, errMode := requestedImportMode(fields, req.Mode, m.config().Mode)
 	if errMode != nil {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid mode"})
 	}
@@ -321,15 +323,20 @@ func (m *Manager) importKeys(body []byte) ([]byte, error) {
 }
 
 // requestedImportMode treats a missing field as the plugin default. An explicit
-// empty or illegal mode is rejected before any credential is written.
-func requestedImportMode(raw *string, fallback Mode) (Mode, error) {
-	if raw == nil {
+// null, number, empty string or illegal mode is rejected before any write.
+func requestedImportMode(fields map[string]json.RawMessage, raw json.RawMessage, fallback Mode) (Mode, error) {
+	if _, ok := fields["mode"]; !ok {
 		return fallback, nil
 	}
-	if *raw == "" || strings.TrimSpace(*raw) != *raw {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
 		return "", errInvalidAuthMode
 	}
-	return importMode(*raw, fallback)
+	result := classifyModeValue(value)
+	if result.Invalid {
+		return "", errInvalidAuthMode
+	}
+	return result.Mode, nil
 }
 
 // importMode accepts an omitted mode as the plugin default. An explicit empty
@@ -358,7 +365,7 @@ func (m *Manager) patchKeyMode(body []byte) ([]byte, error) {
 		return managementJSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 	}
 	var req patchModeRequest
-	if err := decodeStrictObject(body, &req); err != nil || strings.TrimSpace(req.AuthIndex) == "" {
+	if _, err := decodeStrictObject(body, &req); err != nil || strings.TrimSpace(req.AuthIndex) == "" {
 		return managementJSON(http.StatusBadRequest, map[string]string{"error": "invalid mode patch"})
 	}
 	mode, errMode := importMode(req.Mode, "")
@@ -432,96 +439,17 @@ func jsonStringField(raw map[string]json.RawMessage, field string) string {
 	return value
 }
 
-// patchModeJSON replaces or inserts only the root mode field. Every other
-// field, including unknown fields, object key order and exact JSON numbers, is
-// copied unchanged. host.auth.save replaces the whole file, so this is the only
-// safe rewrite.
+// patchModeJSON replaces or inserts only the root mode field. sjson keeps the
+// surrounding object order and the exact text of every other value.
 func patchModeJSON(raw json.RawMessage, mode Mode) (json.RawMessage, error) {
-	if !json.Valid(raw) {
-		return nil, errInvalidAuthMode
-	}
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil || probe == nil {
-		return nil, errInvalidAuthMode
-	}
-	encoded, err := json.Marshal(string(mode))
-	if err != nil {
+	if _, err := objectFields(raw); err != nil {
 		return nil, err
 	}
-	updated := setRawObjectField(raw, authModeField, encoded)
-	if !json.Valid(updated) {
+	updated, err := sjson.SetBytes(raw, authModeField, string(mode))
+	if err != nil || !json.Valid(updated) {
 		return nil, errInvalidAuthMode
 	}
 	return updated, nil
-}
-
-// setRawObjectField rewrites one root object field without reparsing the other
-// values. A missing field is inserted before the closing brace.
-func setRawObjectField(raw json.RawMessage, field string, value json.RawMessage) json.RawMessage {
-	trimmed := bytes.TrimSpace(raw)
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	token, err := dec.Token()
-	if err != nil || token != json.Delim('{') {
-		return nil
-	}
-	key, err := json.Marshal(field)
-	if err != nil {
-		return nil
-	}
-	var rebuilt bytes.Buffer
-	rebuilt.WriteByte('{')
-	replaced := false
-	first := true
-	for dec.More() {
-		token, err = dec.Token()
-		name, ok := token.(string)
-		if err != nil || !ok {
-			return nil
-		}
-		rawValue, errValue := nextRawValue(dec)
-		if errValue != nil {
-			return nil
-		}
-		if !first {
-			rebuilt.WriteByte(',')
-		}
-		first = false
-		encodedName, errName := json.Marshal(name)
-		if errName != nil {
-			return nil
-		}
-		rebuilt.Write(encodedName)
-		rebuilt.WriteByte(':')
-		if name == field {
-			rebuilt.Write(bytes.TrimSpace(value))
-			replaced = true
-			continue
-		}
-		rebuilt.Write(bytes.TrimSpace(rawValue))
-	}
-	token, err = dec.Token()
-	if err != nil || token != json.Delim('}') {
-		return nil
-	}
-	if !replaced {
-		if !first {
-			rebuilt.WriteByte(',')
-		}
-		rebuilt.Write(key)
-		rebuilt.WriteByte(':')
-		rebuilt.Write(bytes.TrimSpace(value))
-	}
-	rebuilt.WriteByte('}')
-	return rebuilt.Bytes()
-}
-
-// nextRawValue copies one JSON value exactly as the decoder buffered it.
-func nextRawValue(dec *json.Decoder) (json.RawMessage, error) {
-	var value json.RawMessage
-	if err := dec.Decode(&value); err != nil {
-		return nil, err
-	}
-	return value, nil
 }
 
 // safeAuthFileName accepts only a flat .json file name. Paths, hidden names
@@ -542,18 +470,58 @@ func safeAuthFileName(name string) bool {
 	return !strings.Contains(name, "/") && !strings.Contains(name, "\\")
 }
 
-// decodeStrictObject rejects unknown fields, duplicate keys and trailing JSON.
-func decodeStrictObject(body []byte, out any) error {
+// decodeStrictObject requires one JSON object, unique root keys, no trailing
+// payload, and then a DisallowUnknownFields decode into out.
+func decodeStrictObject(body []byte, out any) (map[string]json.RawMessage, error) {
+	fields, err := objectFields(body)
+	if err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
-		return err
+		return nil, err
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("trailing json")
+		return nil, fmt.Errorf("trailing json")
 	}
-	return nil
+	return fields, nil
+}
+
+// objectFields reads one root object and rejects a repeated key. Values stay
+// raw so the error never needs to include them.
+func objectFields(body []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, fmt.Errorf("json object required")
+	}
+	fields := map[string]json.RawMessage{}
+	for dec.More() {
+		token, err = dec.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return nil, fmt.Errorf("json object required")
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, fmt.Errorf("json object required")
+		}
+		if _, exists := fields[name]; exists {
+			return nil, fmt.Errorf("duplicate json field")
+		}
+		fields[name] = raw
+	}
+	token, err = dec.Token()
+	if err != nil || token != json.Delim('}') {
+		return nil, fmt.Errorf("json object required")
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("trailing json")
+	}
+	return fields, nil
 }
 
 // validateImportKeys validates the whole input before any persistence and

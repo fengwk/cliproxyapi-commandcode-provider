@@ -342,6 +342,8 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 		m.shutdown()
 		return okEnvelope(struct{}{})
 	case pluginabi.MethodModelStatic:
+		// Static discovery follows the plugin default. Per-auth catalogs are
+		// served by model.for_auth and do not change this shared config.
 		cfg := m.config()
 		if cfg.Mode == ModeProvider {
 			if run, ok := m.beginRun(); ok {

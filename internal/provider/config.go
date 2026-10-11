@@ -40,8 +40,9 @@ const (
 	endpointProviderResponses = "/provider/v1/responses"
 )
 
-// Mode selects exactly one transport. There is no automatic fallback between
-// modes: a mode change is an administrator action.
+// Mode selects exactly one transport. The plugin value is only the default for
+// a credential that does not declare its own mode; it never switches after an
+// error and never overrides an explicit auth mode.
 type Mode string
 
 const (
@@ -51,9 +52,9 @@ const (
 	ModeProvider Mode = "provider"
 )
 
-// ManualModel explicitly adds or overrides one published model. In provider
-// mode Protocol is required because it declares the single supported endpoint;
-// in CLI mode it is optional and never changes the CLI wire.
+// ManualModel explicitly adds or overrides one published model. Its structure is
+// shared by both transports. Provider routing still needs a protocol or a chat
+// endpoint in the current catalog; CLI routing rejects a non text/image input.
 type ManualModel struct {
 	ID               string   `yaml:"id" json:"id"`
 	Protocol         string   `yaml:"protocol,omitempty" json:"protocol,omitempty"`
