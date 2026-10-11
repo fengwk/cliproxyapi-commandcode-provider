@@ -15,6 +15,7 @@ var (
 	errMissingSession  = errors.New("canonical session id is required")
 	errSessionScope    = errors.New("failed to derive session scope")
 	errMissingKey      = errors.New("selected auth has no api key")
+	errInvalidKey      = errors.New("selected auth has an invalid api key")
 	errUnsupportedPair = errors.New("unsupported protocol translation pair")
 )
 
@@ -49,9 +50,11 @@ func parseAuth(req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, err
 		(record.Type != ProviderID && record.Provider != ProviderID) {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
-	key := strings.TrimSpace(record.APIKey)
-	if key == "" {
+	if record.APIKey == "" {
 		return pluginapi.AuthParseResponse{}, errors.New("commandcode auth record has no api key")
+	}
+	if !isSafeAPIKey(record.APIKey) {
+		return pluginapi.AuthParseResponse{}, errors.New("commandcode auth record has an invalid api key")
 	}
 	id := strings.TrimSpace(req.FileName)
 	if id == "" {
@@ -72,7 +75,7 @@ func parseAuth(req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, err
 			Disabled:    record.Disabled,
 			StorageJSON: req.RawJSON,
 			Metadata:    nativeMetadata(raw),
-			Attributes:  map[string]string{"api_key": key},
+			Attributes:  map[string]string{"api_key": record.APIKey},
 		},
 	}, nil
 }
@@ -127,24 +130,50 @@ func nativeMetadata(raw map[string]any) map[string]any {
 // resolveKey reads the credential with the documented fallback order:
 // AuthAttributes, then AuthMetadata, then StorageJSON. host.auth.save initially
 // exposes newly imported keys as metadata-only, so metadata must be consulted.
+// The first source that holds a non-empty key decides the outcome: an invalid
+// value there fails closed instead of silently falling through to another key.
 func resolveKey(attributes map[string]string, metadata map[string]any, storage []byte) (string, error) {
-	if key := strings.TrimSpace(attributes["api_key"]); key != "" {
-		return key, nil
+	if raw, ok := attributes["api_key"]; ok && raw != "" {
+		return validateResolvedKey(raw)
 	}
 	for _, field := range []string{"api_key", "apiKey"} {
-		if value, ok := metadata[field].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value), nil
+		if value, ok := metadata[field].(string); ok && value != "" {
+			return validateResolvedKey(value)
 		}
 	}
 	if len(storage) > 0 {
 		var record authRecord
-		if err := json.Unmarshal(storage, &record); err == nil {
-			if key := strings.TrimSpace(record.APIKey); key != "" {
-				return key, nil
-			}
+		if err := json.Unmarshal(storage, &record); err == nil && record.APIKey != "" {
+			return validateResolvedKey(record.APIKey)
 		}
 	}
 	return "", errMissingKey
+}
+
+// validateResolvedKey fails closed unless the credential is a bounded,
+// ASCII-only token with no whitespace, control characters or header-breaking
+// bytes, so it can never be interpolated into an Authorization header.
+func validateResolvedKey(raw string) (string, error) {
+	if !isSafeAPIKey(raw) {
+		return "", errInvalidKey
+	}
+	return raw, nil
+}
+
+// isSafeAPIKey is the credential safety policy shared by auth parsing and key
+// resolution: non-empty, at most maxKeyLength bytes, and every byte must be
+// printable ASCII (0x21..0x7e). This rejects all whitespace (ASCII and Unicode),
+// control characters, DEL and any non-ASCII byte that could smuggle a header.
+func isSafeAPIKey(raw string) bool {
+	if raw == "" || len(raw) > maxKeyLength {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] <= 0x20 || raw[i] >= 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // authDisabled reports whether host metadata marks the credential disabled.

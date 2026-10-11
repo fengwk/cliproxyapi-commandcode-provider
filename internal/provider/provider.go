@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"fmt"
+
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -43,7 +45,7 @@ func Metadata() pluginapi.Metadata {
 			{
 				Name:        "base-url",
 				Type:        pluginapi.ConfigFieldTypeString,
-				Description: "API authority (default: https://api.commandcode.ai). Paths are appended by the plugin; userinfo, query and fragment are rejected.",
+				Description: "API base URL (default: https://api.commandcode.ai). A path prefix is preserved and the plugin appends the fixed /alpha and /provider/v1 paths; userinfo, query and fragment are rejected.",
 			},
 			{
 				Name:        "zdr",
@@ -83,18 +85,17 @@ type registrationCapability struct {
 	QuotaProvider         bool     `json:"quota_provider"`
 }
 
-// registrationResponse negotiates the schema conservatively: never claim a
-// newer contract than the host offered, and never exceed the SDK schema.
-func registrationResponse(hostSchema uint32) registration {
-	schema := pluginabi.SchemaVersion
-	if hostSchema != 0 && hostSchema < schema {
-		schema = hostSchema
-	}
-	if schema == 0 {
-		schema = 1
+// registrationResponse negotiates the schema conservatively. CommandCode's
+// native wire contract requires the current SDK schema: a host that advertises
+// an older, non-zero schema is rejected outright rather than downgraded, so the
+// plugin never claims wire support (e.g. wire profiles) an old host lacks. A
+// zero schema is a metadata-only probe and is answered with the native schema.
+func registrationResponse(hostSchema uint32) (registration, error) {
+	if hostSchema != 0 && hostSchema < pluginabi.SchemaVersion {
+		return registration{}, fmt.Errorf("host plugin schema v%d is unsupported; commandcode requires v%d", hostSchema, pluginabi.SchemaVersion)
 	}
 	return registration{
-		SchemaVersion: schema,
+		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata:      Metadata(),
 		Capabilities: registrationCapability{
 			ModelProvider:         true,
@@ -107,5 +108,5 @@ func registrationResponse(hostSchema uint32) registration {
 			ManagementAPI:         true,
 			QuotaProvider:         true,
 		},
-	}
+	}, nil
 }

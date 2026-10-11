@@ -8,10 +8,16 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+
+	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/catalogdata"
 )
 
 // quotaDisplayName is the user-facing label published to management clients.
 const quotaDisplayName = "CommandCode"
+
+// quotaHTTPDeadline bounds each account-probe HTTP call so a stuck upstream
+// cannot hold the quota RPC open indefinitely.
+const quotaHTTPDeadline = 15 * time.Second
 
 // Fixed account windows published as quota buckets. Only windows with a known
 // positive cap become buckets; a missing window is never faked as zero.
@@ -95,7 +101,7 @@ func (m *Manager) fetchQuota(req rpcQuotaRequest) (pluginapi.QuotaFetchResponse,
 	cfg := m.config()
 	headers := quotaHeaders(key)
 
-	creditsResp, errCredits := m.doHTTP(run, req.HostCallbackID, http.MethodGet, joinURL(cfg.BaseURL, endpointCredits), headers, nil, nil)
+	creditsResp, errCredits := m.doHTTPDeadline(run, req.HostCallbackID, http.MethodGet, joinURL(cfg.BaseURL, endpointCredits), headers, nil, nil, quotaHTTPDeadline)
 	if errCredits != nil {
 		return pluginapi.QuotaFetchResponse{}, errCredits
 	}
@@ -110,20 +116,24 @@ func (m *Manager) fetchQuota(req rpcQuotaRequest) (pluginapi.QuotaFetchResponse,
 
 	// Subscriptions are display metadata only: a failure never discards the
 	// credit snapshot already obtained.
-	subsResp, errSubs := m.doHTTP(run, req.HostCallbackID, http.MethodGet, joinURL(cfg.BaseURL, endpointSubscriptions), headers, nil, nil)
+	subsResp, errSubs := m.doHTTPDeadline(run, req.HostCallbackID, http.MethodGet, joinURL(cfg.BaseURL, endpointSubscriptions), headers, nil, nil, quotaHTTPDeadline)
 	if errSubs == nil && subsResp.StatusCode >= 200 && subsResp.StatusCode < 300 {
 		response.Subscription = normalizeSubscription(subsResp.Body)
 	}
 	return response, nil
 }
 
-// quotaHeaders builds the fixed upstream header set for the account probes. No
-// session, cache or client headers are forwarded.
+// quotaHeaders builds the fixed upstream header set for the account probes. It
+// presents as the reviewed CLI (User-Agent "cli" plus the bound CLI version and
+// production environment) and forwards no session, project, prompt or client
+// header — none of which the account reads need or may invent.
 func quotaHeaders(key string) http.Header {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+key)
 	headers.Set("Accept", "application/json")
-	headers.Set("User-Agent", PluginID+"/"+Version)
+	headers.Set("User-Agent", "cli")
+	headers.Set("x-command-code-version", catalogdata.CLIVersion)
+	headers.Set("x-cli-environment", "production")
 	return headers
 }
 
@@ -149,7 +159,11 @@ func normalizeCredits(body []byte) (pluginapi.QuotaFetchResponse, error) {
 	}
 	response := pluginapi.QuotaFetchResponse{}
 	if payload.Credits != nil {
-		response.Summary = creditMetrics(payload.Credits.MonthlyCredits, payload.Credits.PurchasedCredits, payload.Credits.FreeCredits)
+		metrics, errMetrics := creditMetrics(payload.Credits.MonthlyCredits, payload.Credits.PurchasedCredits, payload.Credits.FreeCredits)
+		if errMetrics != nil {
+			return pluginapi.QuotaFetchResponse{}, errMetrics
+		}
+		response.Summary = metrics
 	}
 	if payload.WindowLimits != nil {
 		buckets := make([]pluginapi.QuotaBucket, 0, 2)
@@ -168,8 +182,15 @@ func normalizeCredits(body []byte) (pluginapi.QuotaFetchResponse, error) {
 
 // creditMetrics publishes the credit components the API returned and their
 // total, but only when all three components are present so a partial sum is
-// never presented as a whole-account total.
-func creditMetrics(monthly, purchased, free *float64) []pluginapi.QuotaMetric {
+// never presented as a whole-account total. A component that is negative or not
+// finite is rejected outright rather than clamped, and the total is omitted if
+// it would overflow to infinity.
+func creditMetrics(monthly, purchased, free *float64) ([]pluginapi.QuotaMetric, error) {
+	for _, value := range []*float64{monthly, purchased, free} {
+		if value != nil && !finiteNonNegative(*value) {
+			return nil, quotaInvalid()
+		}
+	}
 	metrics := make([]pluginapi.QuotaMetric, 0, 4)
 	appendMetric := func(key, label string, value *float64) {
 		if value == nil {
@@ -182,15 +203,29 @@ func creditMetrics(monthly, purchased, free *float64) []pluginapi.QuotaMetric {
 	appendMetric("free_credits", "Free credits", free)
 	if monthly != nil && purchased != nil && free != nil {
 		total := *monthly + *purchased + *free
-		metrics = append(metrics, pluginapi.QuotaMetric{Key: "total_credits", Label: "Total credits", Value: total, Unit: "credits", Format: "number"})
+		if !math.IsInf(total, 0) && !math.IsNaN(total) {
+			metrics = append(metrics, pluginapi.QuotaMetric{Key: "total_credits", Label: "Total credits", Value: total, Unit: "credits", Format: "number"})
+		}
 	}
-	return metrics
+	return metrics, nil
 }
 
-// windowBucket maps one known window to a bucket. A window without a positive
-// cap or without a used value carries no reliable fraction, so it is omitted.
+// finiteNonNegative reports a usable quota number: a real, non-negative value.
+func finiteNonNegative(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+// windowBucket maps one known window to a bucket. A window without a positive,
+// finite cap or without a finite, non-negative used value carries no reliable
+// fraction, so it is omitted rather than clamped into a normal-looking bucket.
 func windowBucket(name string, window *accountWindow) (pluginapi.QuotaBucket, bool) {
-	if window == nil || window.Cap == nil || window.Used == nil || *window.Cap <= 0 {
+	if window == nil || window.Cap == nil || window.Used == nil {
+		return pluginapi.QuotaBucket{}, false
+	}
+	if !finiteNonNegative(*window.Cap) || !finiteNonNegative(*window.Used) {
+		return pluginapi.QuotaBucket{}, false
+	}
+	if *window.Cap == 0 {
 		return pluginapi.QuotaBucket{}, false
 	}
 	remaining := 1 - *window.Used / *window.Cap
@@ -200,27 +235,42 @@ func windowBucket(name string, window *accountWindow) (pluginapi.QuotaBucket, bo
 	if remaining > 1 {
 		remaining = 1
 	}
-	if math.IsNaN(remaining) {
-		return pluginapi.QuotaBucket{}, false
-	}
 	bucket := pluginapi.QuotaBucket{Window: name, RemainingFraction: remaining}
-	if window.ResetAt != nil && *window.ResetAt > 0 {
-		bucket.ResetTime = time.UnixMilli(*window.ResetAt).UTC().Format(time.RFC3339)
+	if window.ResetAt != nil {
+		if reset, ok := validResetTime(*window.ResetAt); ok {
+			bucket.ResetTime = reset
+		}
 	}
 	return bucket, true
 }
 
-// normalizeSubscription keeps only the plan facts actually returned. Unknown
-// plans are shown raw and bounded; no allowance is inferred.
+// validResetTime renders a Unix-millisecond reset instant only when it is a
+// real, positive instant inside the RFC3339 year range 1..9999; an out-of-range
+// or non-positive value is omitted rather than clamped.
+func validResetTime(millis int64) (string, bool) {
+	if millis <= 0 {
+		return "", false
+	}
+	instant := time.UnixMilli(millis).UTC()
+	if year := instant.Year(); year < 1 || year > 9999 {
+		return "", false
+	}
+	return instant.Format(time.RFC3339), true
+}
+
+// normalizeSubscription keeps only the plan facts actually returned. The ABI
+// exposes Plan/TierName/TierID only, with no status field: the upstream
+// subscription status is therefore never mapped onto TierName (that would fake
+// a tier named "active"). Unknown plans are shown raw and bounded; no allowance
+// or tier is inferred.
 func normalizeSubscription(body []byte) *pluginapi.QuotaSubscription {
 	var payload subscriptionsShape
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Data == nil {
 		return nil
 	}
 	plan := bounded(payload.Data.PlanID)
-	status := bounded(payload.Data.Status)
-	if plan == "" && status == "" {
+	if plan == "" {
 		return nil
 	}
-	return &pluginapi.QuotaSubscription{Plan: plan, TierName: status}
+	return &pluginapi.QuotaSubscription{Plan: plan}
 }

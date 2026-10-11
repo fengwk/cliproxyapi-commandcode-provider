@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -35,6 +36,10 @@ type Manager struct {
 
 	mu  sync.RWMutex
 	cfg Config
+	// generation increments on every config change so an in-flight catalog
+	// refresh prepared under an older authority can be discarded instead of
+	// overwriting the new authority's snapshot.
+	generation uint64
 
 	catalog catalogState
 
@@ -72,7 +77,15 @@ func (m *Manager) config() Config {
 func (m *Manager) setConfig(cfg Config) {
 	m.mu.Lock()
 	m.cfg = cfg
+	m.generation++
 	m.mu.Unlock()
+}
+
+// configGeneration returns the current config generation under the read lock.
+func (m *Manager) configGeneration() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.generation
 }
 
 // beginRun captures the stop channel of the current run for a new execution. It
@@ -254,17 +267,26 @@ func (m *Manager) applyConfig(cfg Config) error {
 
 // doHTTP performs one host HTTP request under the current run, registering the
 // operation before the open so quiesce/shutdown can interrupt a blocked call.
+// It carries no plugin-side deadline: the host owns the model-inference timeout.
 func (m *Manager) doHTTP(run chan struct{}, callbackID, method, url string, headers http.Header, body []byte, wire *pluginapi.HTTPWireProfile) (pluginapi.HTTPResponse, error) {
+	return m.doHTTPDeadline(run, callbackID, method, url, headers, body, wire, 0)
+}
+
+// doHTTPDeadline is doHTTP with an optional explicit, plugin-owned deadline for
+// control-plane calls such as quota and catalog probes. When timeout > 0 a timer
+// cancels the host operation, and the timer callback is always joined before the
+// request slot is released so no cancel can outlive finishRequest or shutdown.
+func (m *Manager) doHTTPDeadline(run chan struct{}, callbackID, method, url string, headers http.Header, body []byte, wire *pluginapi.HTTPWireProfile, timeout time.Duration) (pluginapi.HTTPResponse, error) {
 	if run == nil {
 		captured, ok := m.beginRun()
 		if !ok {
-			return pluginapi.HTTPResponse{}, &ProviderError{Code: "unavailable", Message: "plugin is shutting down", HTTPStatus: http.StatusServiceUnavailable}
+			return pluginapi.HTTPResponse{}, unavailableProviderError()
 		}
 		run = captured
 	}
 	key, ok := m.registerRequest(run)
 	if !ok {
-		return pluginapi.HTTPResponse{}, &ProviderError{Code: "unavailable", Message: "plugin is shutting down", HTTPStatus: http.StatusServiceUnavailable}
+		return pluginapi.HTTPResponse{}, unavailableProviderError()
 	}
 	defer m.finishRequest(key)
 
@@ -274,9 +296,30 @@ func (m *Manager) doHTTP(run chan struct{}, callbackID, method, url string, head
 	}
 	if m.setOperation(key, run, callbackID, operationID) {
 		m.bridge.Cancel(callbackID, operationID)
-		return pluginapi.HTTPResponse{}, &ProviderError{Code: "unavailable", Message: "plugin is shutting down", HTTPStatus: http.StatusServiceUnavailable}
+		return pluginapi.HTTPResponse{}, unavailableProviderError()
+	}
+	if timeout > 0 {
+		// cancelDone closes after the timer callback (the host cancel RPC) exits.
+		cancelDone := make(chan struct{})
+		timer := time.AfterFunc(timeout, func() {
+			defer close(cancelDone)
+			m.bridge.Cancel(callbackID, operationID)
+		})
+		// Registered after finishRequest, so it runs first (LIFO): the cancel
+		// callback is joined before the request slot is released.
+		defer func() {
+			if !timer.Stop() {
+				<-cancelDone
+			}
+		}()
 	}
 	return m.bridge.HTTPDo(method, url, headers, body, callbackID, operationID, wire)
+}
+
+// unavailableProviderError is the shared fail-closed error for work that cannot
+// start because the plugin is quiescing or shut down.
+func unavailableProviderError() error {
+	return &ProviderError{Code: "unavailable", Message: "plugin is shutting down", HTTPStatus: http.StatusServiceUnavailable}
 }
 
 // HandleCall dispatches one RPC method. Handler failures travel inside the
@@ -419,7 +462,11 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	if err := m.applyConfig(cfg); err != nil {
 		return mustEnvelope(resultError(err))
 	}
-	return okEnvelope(registrationResponse(req.SchemaVersion))
+	reg, errRegister := registrationResponse(req.SchemaVersion)
+	if errRegister != nil {
+		return mustEnvelope(errorResult("unsupported_schema", errRegister.Error(), http.StatusBadRequest))
+	}
+	return okEnvelope(reg)
 }
 
 // handleModelsForAuth returns the same effective catalog as the static path. The

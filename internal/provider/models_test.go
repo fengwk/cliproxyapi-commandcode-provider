@@ -1,8 +1,13 @@
 package provider
 
 import (
+	"errors"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -153,5 +158,159 @@ func TestFactsThinkingHonest(t *testing.T) {
 	support := levelled.thinkingSupport()
 	if support == nil || len(support.Levels) != 2 {
 		t.Fatalf("observed effort levels must be published: %+v", support)
+	}
+}
+
+func TestCatalogCountReflectsEffectiveModels(t *testing.T) {
+	narrowed := NewManager(nil)
+	narrowed.setConfig(Config{Mode: ModeCLI, BaseURL: DefaultBaseURL, Models: []string{"claude-sonnet-5"}})
+	if info := narrowed.catalogInfoForMode(narrowed.config()); info.Count != 1 {
+		t.Fatalf("the catalog count must reflect the whitelist, got %d", info.Count)
+	}
+	withManual := testManager(ModeCLI, ManualModel{ID: "minimax/minimax-m3-free"})
+	if info := withManual.catalogInfoForMode(withManual.config()); info.Count != 88 {
+		t.Fatalf("the catalog count must include manual models, got %d", info.Count)
+	}
+}
+
+func TestRefreshCatalogFailureMarksStaleKeepsLastGood(t *testing.T) {
+	host := &fakeHost{}
+	healthy := true
+	host.handler = func(method string, _ []byte) (any, error) {
+		switch method {
+		case pluginabi.MethodHostHTTPOperationOpen:
+			return map[string]string{"operation_id": "op"}, nil
+		case pluginabi.MethodHostHTTPDo:
+			if !healthy {
+				return nil, errors.New("upstream down")
+			}
+			return httpOKResult(`{"data":[{"id":"commandcode/alpha","supported_endpoints":["/chat/completions"]}]}`, nil), nil
+		default:
+			return nil, nil
+		}
+	}
+	m := host.manager()
+	m.setConfig(Config{Mode: ModeProvider, BaseURL: "http://127.0.0.1:9"})
+	m.refreshCatalog(nil, "")
+	if models, info := m.catalogSnapshot(m.config()); info.Source != "live" || info.Stale || len(models) != 1 {
+		t.Fatalf("a successful refresh must yield a fresh live snapshot: %+v", info)
+	}
+	// A later failure must keep the last-good snapshot but flag it stale.
+	healthy = false
+	m.catalog.mu.Lock()
+	m.catalog.lastAttempt = time.Time{}
+	m.catalog.mu.Unlock()
+	m.refreshCatalog(nil, "")
+	models, info := m.catalogSnapshot(m.config())
+	if info.Source != "live" || !info.Stale {
+		t.Fatalf("a failed refresh must report the last-good snapshot stale: %+v", info)
+	}
+	if len(models) != 1 {
+		t.Fatalf("a failed refresh must not clear the last-good snapshot: %+v", models)
+	}
+}
+
+func TestCatalogSnapshotBoundToAuthority(t *testing.T) {
+	host := &fakeHost{}
+	host.handler = func(method string, _ []byte) (any, error) {
+		switch method {
+		case pluginabi.MethodHostHTTPOperationOpen:
+			return map[string]string{"operation_id": "op"}, nil
+		case pluginabi.MethodHostHTTPDo:
+			return httpOKResult(`{"data":[{"id":"commandcode/alpha","supported_endpoints":["/chat/completions"]}]}`, nil), nil
+		default:
+			return nil, nil
+		}
+	}
+	m := host.manager()
+	m.setConfig(Config{Mode: ModeProvider, BaseURL: "http://127.0.0.1:9"})
+	m.refreshCatalog(nil, "")
+	if _, info := m.catalogSnapshot(m.config()); info.Source != "live" {
+		t.Fatalf("expected a live snapshot for the first authority: %+v", info)
+	}
+	// Switching authority must not reuse the old snapshot's endpoints.
+	m.setConfig(Config{Mode: ModeProvider, BaseURL: "http://127.0.0.1:8"})
+	if _, info := m.catalogSnapshot(m.config()); info.Source != "embedded" || !info.Stale {
+		t.Fatalf("a snapshot bound to the old authority must not be reused: %+v", info)
+	}
+}
+
+func TestInFlightRefreshDiscardedOnAuthorityChange(t *testing.T) {
+	host := &fakeHost{}
+	var m *Manager
+	host.handler = func(method string, _ []byte) (any, error) {
+		switch method {
+		case pluginabi.MethodHostHTTPOperationOpen:
+			return map[string]string{"operation_id": "op"}, nil
+		case pluginabi.MethodHostHTTPDo:
+			// The authority changes while the refresh is in flight.
+			m.setConfig(Config{Mode: ModeProvider, BaseURL: "http://127.0.0.1:8"})
+			return httpOKResult(`{"data":[{"id":"commandcode/alpha","supported_endpoints":["/chat/completions"]}]}`, nil), nil
+		default:
+			return nil, nil
+		}
+	}
+	m = host.manager()
+	m.setConfig(Config{Mode: ModeProvider, BaseURL: "http://127.0.0.1:9"})
+	m.refreshCatalog(nil, "")
+
+	m.catalog.mu.Lock()
+	live := m.catalog.live
+	m.catalog.mu.Unlock()
+	if live != nil {
+		t.Fatalf("a refresh that spanned an authority change must be discarded")
+	}
+	if _, info := m.catalogSnapshot(m.config()); info.Source != "embedded" {
+		t.Fatalf("the new authority must fall back to embedded: %+v", info)
+	}
+}
+
+func TestNonChatCatalogEntriesNotPublishedOrRoutable(t *testing.T) {
+	body := `{"data":[` +
+		`{"id":"commandcode/system-only","supported_endpoints":["/system/decide"]},` +
+		`{"id":"commandcode/chat-only","supported_endpoints":["/chat/completions"]}]}`
+	m := newManagerWithHTTP(body, nil)
+	m.refreshCatalog(nil, "")
+	models := m.publishedModels(m.config())
+	for _, model := range models {
+		if strings.HasSuffix(model.ID, "system-only") {
+			t.Fatalf("a non-chat endpoint must not be published: %+v", model)
+		}
+	}
+	foundChat := false
+	for _, model := range models {
+		if strings.HasSuffix(model.ID, "chat-only") {
+			foundChat = true
+		}
+	}
+	if !foundChat {
+		t.Fatalf("a chat-capable entry must be published: %+v", models)
+	}
+	if _, ok := m.lookupFacts(m.config(), "system-only"); ok {
+		t.Fatalf("a non-chat entry must not be routable")
+	}
+}
+
+func TestDecodePublicCatalogBounds(t *testing.T) {
+	if _, err := decodePublicCatalog([]byte(`{"data":[{"id":"x","context_length":-1,"supported_endpoints":["/chat/completions"]}]}`)); err == nil {
+		t.Fatalf("a negative context length must be rejected")
+	}
+	if _, err := decodePublicCatalog([]byte(`{"data":[{"id":"","supported_endpoints":["/chat/completions"]}]}`)); err == nil {
+		t.Fatalf("an empty id must be rejected")
+	}
+	if _, err := decodePublicCatalog([]byte(`{"data":[{"id":"a b","supported_endpoints":["/chat/completions"]}]}`)); err == nil {
+		t.Fatalf("an id with whitespace must be rejected")
+	}
+	entries := make([]string, 0, maxCatalogEntries+1)
+	for i := 0; i <= maxCatalogEntries; i++ {
+		entries = append(entries, `{"id":"m`+strconv.Itoa(i)+`","supported_endpoints":["/chat/completions"]}`)
+	}
+	if _, err := decodePublicCatalog([]byte(`{"data":[` + strings.Join(entries, ",") + `]}`)); err == nil {
+		t.Fatalf("a catalog larger than %d entries must be rejected", maxCatalogEntries)
+	}
+	// Unknown capability fields are ignored, never guessed into reasoning facts.
+	models, err := decodePublicCatalog([]byte(`{"data":[{"id":"commandcode/x","context_length":7,"reasoning":true,"unknown":"y","supported_endpoints":["/chat/completions"]}]}`))
+	if err != nil || len(models) != 1 || models[0].ContextLength != 7 {
+		t.Fatalf("unknown fields must be ignored: %v %+v", err, models)
 	}
 }

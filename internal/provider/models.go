@@ -243,30 +243,49 @@ type catalogInfo struct {
 }
 
 // catalogState caches the last successful live public catalog. It is bounded to
-// one snapshot and never grows.
+// one snapshot and never grows, and it is bound to the authority and config
+// generation it was fetched under so a change of authority cannot reuse a stale
+// snapshot or let an old in-flight refresh overwrite the new one.
 type catalogState struct {
 	mu          sync.Mutex
 	live        []publicModel
 	liveAt      time.Time
+	liveBase    string
+	liveGen     uint64
 	lastAttempt time.Time
+	lastFailed  bool
 	refreshing  bool
 }
 
-// refreshInterval bounds how often a discovery-driven live refresh may run.
-const refreshInterval = time.Minute
+const (
+	// refreshInterval bounds how often a discovery-driven live refresh may run.
+	refreshInterval = time.Minute
+	// catalogStaleAfter is the age beyond which a live snapshot is reported grey.
+	catalogStaleAfter = 30 * time.Minute
+	// catalogHTTPDeadline bounds the catalog probe HTTP call.
+	catalogHTTPDeadline = 15 * time.Second
+	// maxCatalogEntries bounds one decoded public catalog so a hostile response
+	// cannot expand the published set without bound.
+	maxCatalogEntries = 5000
+)
 
-// snapshot returns the current public catalog: the last successful live fetch,
-// or the embedded reviewed snapshot marked stale.
-func (m *Manager) catalogSnapshot() ([]publicModel, catalogInfo) {
+// snapshot returns the current public catalog: the last successful live fetch
+// when it is still bound to cfg's authority and config generation, otherwise
+// the embedded reviewed snapshot marked stale. A snapshot whose last refresh
+// failed or that has exceeded catalogStaleAfter is reported stale, but the
+// last-good data is never cleared.
+func (m *Manager) catalogSnapshot(cfg Config) ([]publicModel, catalogInfo) {
 	index := loadEmbeddedIndex()
+	generation := m.configGeneration()
 	m.catalog.mu.Lock()
 	defer m.catalog.mu.Unlock()
-	if m.catalog.live != nil {
+	if m.catalog.live != nil && m.catalog.liveBase == cfg.BaseURL && m.catalog.liveGen == generation {
+		stale := m.catalog.lastFailed || time.Since(m.catalog.liveAt) > catalogStaleAfter
 		return m.catalog.live, catalogInfo{
 			Count:     len(m.catalog.live),
 			Source:    "live",
 			FetchedAt: m.catalog.liveAt.UTC().Format(time.RFC3339),
-			Stale:     false,
+			Stale:     stale,
 		}
 	}
 	return embeddedPublicModels(index), catalogInfo{
@@ -288,25 +307,33 @@ func embeddedPublicModels(index catalogIndex) []publicModel {
 
 // catalogInfoForMode reports the read-only catalog status for the current mode.
 // CLI mode always publishes the reviewed embedded snapshot; provider mode
-// reports the live snapshot or the stale last-good fallback.
+// reports the live snapshot or the stale last-good fallback. The count is the
+// effective published model count (whitelist and manual models applied), not a
+// fixed snapshot size.
 func (m *Manager) catalogInfoForMode(cfg Config) catalogInfo {
 	if cfg.Mode == ModeCLI {
-		index := loadEmbeddedIndex()
 		return catalogInfo{
-			Count:     len(index.publicOrder),
+			Count:     len(m.publishedModels(cfg)),
 			Source:    "embedded",
 			FetchedAt: catalogdata.SnapshotDate,
 			Stale:     false,
 		}
 	}
-	_, info := m.catalogSnapshot()
+	_, info := m.catalogSnapshot(cfg)
+	info.Count = len(m.publishedModels(cfg))
 	return info
 }
 
 // refreshCatalog performs at most one anonymous GET /provider/v1/models per
-// refreshInterval and atomically replaces the live snapshot on success. Any
-// failure keeps the previous last-good snapshot; nothing is ever cleared.
+// refreshInterval and atomically replaces the live snapshot on success. A failed
+// refresh keeps the previous last-good snapshot and flags it stale; it is never
+// cleared. A refresh that spans an authority or config-generation change is
+// discarded so it cannot bind a snapshot to the wrong authority.
 func (m *Manager) refreshCatalog(run chan struct{}, callbackID string) {
+	cfg := m.config()
+	base := cfg.BaseURL
+	generation := m.configGeneration()
+
 	m.catalog.mu.Lock()
 	if m.catalog.refreshing {
 		m.catalog.mu.Unlock()
@@ -321,26 +348,39 @@ func (m *Manager) refreshCatalog(run chan struct{}, callbackID string) {
 	m.catalog.lastAttempt = now
 	m.catalog.mu.Unlock()
 
-	models, errFetch := m.fetchPublicCatalog(run, callbackID)
+	models, errFetch := m.fetchPublicCatalog(run, callbackID, base)
+	// Read the fresh config identity before taking catalog.mu so catalog.mu is
+	// never held while acquiring m.mu (consistent lock order, no deadlock).
+	freshGeneration := m.configGeneration()
+	freshBase := m.config().BaseURL
 
 	m.catalog.mu.Lock()
 	defer m.catalog.mu.Unlock()
 	m.catalog.refreshing = false
+	// Discard a refresh whose authority or config generation changed mid-flight.
+	if freshGeneration != generation || freshBase != base {
+		return
+	}
 	if errFetch != nil || models == nil {
+		m.catalog.lastFailed = true
 		return
 	}
 	m.catalog.live = models
 	m.catalog.liveAt = time.Now()
+	m.catalog.liveBase = base
+	m.catalog.liveGen = generation
+	m.catalog.lastFailed = false
 }
 
-// fetchPublicCatalog reads the anonymous public catalog through the host. It is
-// unauthenticated by design: it must never send a selected credential.
-func (m *Manager) fetchPublicCatalog(run chan struct{}, callbackID string) ([]publicModel, error) {
-	cfg := m.config()
+// fetchPublicCatalog reads the anonymous public catalog through the host under a
+// bounded deadline. It is unauthenticated by design: it must never send a
+// selected credential, and it always targets the supplied authority so a probe
+// cannot follow a config change.
+func (m *Manager) fetchPublicCatalog(run chan struct{}, callbackID, base string) ([]publicModel, error) {
 	headers := http.Header{}
 	headers.Set("Accept", "application/json")
 	headers.Set("User-Agent", PluginID+"/"+Version)
-	resp, errDo := m.doHTTP(run, callbackID, http.MethodGet, joinURL(cfg.BaseURL, endpointProviderModels), headers, nil, nil)
+	resp, errDo := m.doHTTPDeadline(run, callbackID, http.MethodGet, joinURL(base, endpointProviderModels), headers, nil, nil, catalogHTTPDeadline)
 	if errDo != nil {
 		return nil, errDo
 	}
@@ -362,17 +402,25 @@ func catalogInvalid() error {
 // decodePublicCatalog validates one public catalog response. Native order and
 // facts are preserved, the public prefix is applied exactly once by modelInfo,
 // and duplicate ids are collapsed. A malformed response rejects the whole
-// catalog so partial or invented data is never published.
+// catalog so partial or invented data is never published. The entry count, id
+// length and context length are all bounded so a hostile catalog cannot expand
+// the published set or smuggle an invalid id/negative window.
 func decodePublicCatalog(body []byte) ([]publicModel, error) {
 	var decoded publicCatalog
 	if err := json.Unmarshal(body, &decoded); err != nil || decoded.Data == nil {
+		return nil, catalogInvalid()
+	}
+	if len(*decoded.Data) > maxCatalogEntries {
 		return nil, catalogInvalid()
 	}
 	models := make([]publicModel, 0, len(*decoded.Data))
 	seen := make(map[string]struct{}, len(*decoded.Data))
 	for _, item := range *decoded.Data {
 		native := nativeModelID(item.ID)
-		if native == "" || strings.IndexFunc(native, invalidNativeRune) >= 0 {
+		if native == "" || len(native) > maxNativeModelIDLen || strings.IndexFunc(native, invalidNativeRune) >= 0 {
+			return nil, catalogInvalid()
+		}
+		if item.ContextLength < 0 {
 			return nil, catalogInvalid()
 		}
 		if _, ok := seen[native]; ok {
@@ -406,7 +454,7 @@ func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
 
 	facts := make([]modelFacts, 0, len(index.publicOrder))
 	if cfg.Mode == ModeProvider {
-		models, _ := m.catalogSnapshot()
+		models, _ := m.catalogSnapshot(cfg)
 		for _, model := range models {
 			if !chatCapable(model) {
 				continue
@@ -429,6 +477,11 @@ func (m *Manager) publishedModels(cfg Config) []pluginapi.ModelInfo {
 		for _, native := range index.cliOrder {
 			model, ok := index.public[native]
 			if !ok {
+				continue
+			}
+			// A reviewed CLI model whose public entry exposes no chat endpoint
+			// (a system/decision endpoint) is neither published nor routable.
+			if !chatCapable(model) {
 				continue
 			}
 			if !allowed(whitelist, native) {
@@ -498,10 +551,14 @@ func (m *Manager) lookupFacts(cfg Config, native string) (modelFacts, bool) {
 		entry = factsFromCLI(cli)
 	}
 	if cfg.Mode == ModeProvider {
-		models, _ := m.catalogSnapshot()
+		models, _ := m.catalogSnapshot(cfg)
 		for _, model := range models {
 			if nativeModelID(model.ID) != native {
 				continue
+			}
+			// A system/decision entry with no chat endpoint is not routable.
+			if !chatCapable(model) {
+				break
 			}
 			entry = entry.mergePublic(model, haveCLI)
 			found = true

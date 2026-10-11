@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -9,6 +11,18 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"gopkg.in/yaml.v3"
+)
+
+// Bounds on administrator-supplied config collections. They keep a malformed or
+// hostile config payload from expanding the published catalog or the metadata
+// lists without bound.
+const (
+	maxConfigModels     = 200
+	maxManualModels     = 100
+	maxTokenLength      = 64
+	maxModalities       = 16
+	maxReasoningEfforts = 16
+	maxNativeModelIDLen = 200
 )
 
 // DefaultBaseURL is the CommandCode API authority. It carries no endpoint path:
@@ -59,14 +73,20 @@ type Config struct {
 	ManualModels []ManualModel
 }
 
-// rawConfig mirrors the flattened plugin config YAML. Unknown keys (including
-// host-owned enabled/priority) are ignored.
+// rawConfig mirrors the flattened plugin config YAML. Decoding rejects unknown
+// keys so a misspelled mode or field fails closed instead of being ignored. The
+// host-owned enabled/priority fields are the only extra keys accepted, because
+// the host injects them into every plugin config payload.
 type rawConfig struct {
 	Mode         string        `yaml:"mode"`
 	BaseURL      string        `yaml:"base-url"`
 	ZDR          *bool         `yaml:"zdr"`
 	Models       []string      `yaml:"models"`
 	ManualModels []ManualModel `yaml:"manual-models"`
+
+	// Enabled and Priority are reserved host-owned fields: accepted and ignored.
+	Enabled  *bool `yaml:"enabled"`
+	Priority *int  `yaml:"priority"`
 }
 
 // parseConfig decodes and validates the lifecycle config payload. An empty
@@ -78,7 +98,15 @@ func parseConfig(configYAML []byte) (Config, error) {
 		return cfg, nil
 	}
 	var raw rawConfig
-	if err := yaml.Unmarshal(configYAML, &raw); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(configYAML))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&raw); err != nil {
+		return Config{}, fmt.Errorf("invalid config yaml")
+	}
+	// A second YAML document is never a valid config payload. io.EOF is the only
+	// acceptable outcome here, so a trailing document is rejected outright.
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
 		return Config{}, fmt.Errorf("invalid config yaml")
 	}
 	if mode := strings.ToLower(strings.TrimSpace(raw.Mode)); mode != "" {
@@ -99,11 +127,19 @@ func parseConfig(configYAML []byte) (Config, error) {
 	if raw.ZDR != nil {
 		cfg.ZDR = *raw.ZDR
 	}
+	if len(raw.Models) > maxConfigModels {
+		return Config{}, fmt.Errorf("models accepts at most %d entries", maxConfigModels)
+	}
+	seenModels := make(map[string]bool, len(raw.Models))
 	for _, candidate := range raw.Models {
 		id := nativeModelID(candidate)
-		if id == "" || len(id) > 200 || strings.IndexFunc(id, invalidNativeRune) >= 0 {
-			return Config{}, fmt.Errorf("models entries must be unique native model ids of at most 200 bytes without the public prefix")
+		if id == "" || len(id) > maxNativeModelIDLen || strings.IndexFunc(id, invalidNativeRune) >= 0 {
+			return Config{}, fmt.Errorf("models entries must be unique native model ids of at most %d bytes", maxNativeModelIDLen)
 		}
+		if seenModels[id] {
+			return Config{}, fmt.Errorf("models entries must be unique native model ids of at most %d bytes", maxNativeModelIDLen)
+		}
+		seenModels[id] = true
 		cfg.Models = append(cfg.Models, id)
 	}
 	models, err := normalizeManualModels(cfg.Mode, raw.ManualModels)
@@ -116,20 +152,22 @@ func parseConfig(configYAML []byte) (Config, error) {
 
 // normalizeManualModels validates explicit model registration. Provider mode
 // requires a declared protocol endpoint; CLI mode accepts an optional protocol
-// that does not change the wire.
+// that does not change the wire. Every list entry is validated strictly so an
+// invalid modality, effort, blank, oversize or duplicate value is reported
+// rather than silently dropped.
 func normalizeManualModels(mode Mode, raw []ManualModel) ([]ManualModel, error) {
-	if len(raw) > 100 {
-		return nil, fmt.Errorf("manual-models accepts at most 100 entries")
+	if len(raw) > maxManualModels {
+		return nil, fmt.Errorf("manual-models accepts at most %d entries", maxManualModels)
 	}
 	models := make([]ManualModel, 0, len(raw))
 	seen := make(map[string]bool, len(raw))
 	for _, item := range raw {
 		id := nativeModelID(item.ID)
-		if id == "" || len(id) > 200 || strings.HasPrefix(strings.TrimSpace(item.ID), modelPrefix) || strings.IndexFunc(id, invalidNativeRune) >= 0 {
-			return nil, fmt.Errorf("manual-models requires unique valid model ids of at most 200 bytes")
+		if id == "" || len(id) > maxNativeModelIDLen || strings.HasPrefix(strings.TrimSpace(item.ID), modelPrefix) || strings.IndexFunc(id, invalidNativeRune) >= 0 {
+			return nil, fmt.Errorf("manual-models requires unique valid model ids of at most %d bytes", maxNativeModelIDLen)
 		}
 		if seen[id] {
-			return nil, fmt.Errorf("manual-models requires unique valid model ids of at most 200 bytes")
+			return nil, fmt.Errorf("manual-models requires unique valid model ids of at most %d bytes", maxNativeModelIDLen)
 		}
 		seen[id] = true
 		protocol := strings.TrimSpace(item.Protocol)
@@ -144,39 +182,91 @@ func normalizeManualModels(mode Mode, raw []ManualModel) ([]ManualModel, error) 
 		if item.ContextWindow < 0 || item.MaxOutputTokens < 0 {
 			return nil, fmt.Errorf("manual-models token limits must not be negative")
 		}
-		normalized := ManualModel{
+		modalities, errModalities := normalizeModalities(mode, item.InputModalities)
+		if errModalities != nil {
+			return nil, errModalities
+		}
+		efforts, errEfforts := normalizeReasoningEfforts(item.ReasoningEfforts)
+		if errEfforts != nil {
+			return nil, errEfforts
+		}
+		models = append(models, ManualModel{
 			ID:               id,
 			Protocol:         protocol,
 			ContextWindow:    item.ContextWindow,
 			MaxOutputTokens:  item.MaxOutputTokens,
-			InputModalities:  normalizeTokenList(item.InputModalities),
-			ReasoningEfforts: normalizeTokenList(item.ReasoningEfforts),
-		}
-		models = append(models, normalized)
+			InputModalities:  modalities,
+			ReasoningEfforts: efforts,
+		})
 	}
 	return models, nil
 }
 
-// normalizeTokenList trims, drops empties and caps a free-form token list so
-// configured metadata cannot inject unbounded display values.
-func normalizeTokenList(values []string) []string {
+// allowedModality is the reviewed input-modality enum. CLI mode only carries
+// text/image (the CLI wire's confirmed set); provider mode additionally accepts
+// the broader public enum. Case is normalized before this check.
+func allowedModality(mode Mode, token string) bool {
+	switch token {
+	case "text", "image":
+		return true
+	case "audio", "video", "pdf", "file":
+		return mode == ModeProvider
+	default:
+		return false
+	}
+}
+
+// normalizeModalities validates the input-modality list: each entry must be a
+// non-empty, bounded, control-free enum member, with no duplicates.
+func normalizeModalities(mode Mode, values []string) ([]string, error) {
 	if len(values) == 0 {
-		return nil
+		return nil, nil
+	}
+	if len(values) > maxModalities {
+		return nil, fmt.Errorf("manual-models input-modalities accepts at most %d entries", maxModalities)
 	}
 	out := make([]string, 0, len(values))
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || len(trimmed) > 64 || seen[trimmed] {
-			continue
+		token := strings.ToLower(value)
+		if token == "" || token != strings.TrimSpace(token) || len(token) > maxTokenLength || strings.IndexFunc(token, invalidNativeRune) >= 0 {
+			return nil, fmt.Errorf("manual-models input-modalities contains an invalid entry")
 		}
-		seen[trimmed] = true
-		out = append(out, trimmed)
+		if !allowedModality(mode, token) {
+			return nil, fmt.Errorf("manual-models input-modalities contains an unsupported entry")
+		}
+		if seen[token] {
+			return nil, fmt.Errorf("manual-models input-modalities contains a duplicate entry")
+		}
+		seen[token] = true
+		out = append(out, token)
 	}
-	if len(out) == 0 {
-		return nil
+	return out, nil
+}
+
+// normalizeReasoningEfforts validates the effort list: bounded count, and each
+// entry non-empty, bounded, control-free and unique.
+func normalizeReasoningEfforts(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
 	}
-	return out
+	if len(values) > maxReasoningEfforts {
+		return nil, fmt.Errorf("manual-models reasoning-efforts accepts at most %d entries", maxReasoningEfforts)
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		token := strings.ToLower(value)
+		if token == "" || token != strings.TrimSpace(token) || len(token) > maxTokenLength || strings.IndexFunc(token, invalidNativeRune) >= 0 {
+			return nil, fmt.Errorf("manual-models reasoning-efforts contains an invalid entry")
+		}
+		if seen[token] {
+			return nil, fmt.Errorf("manual-models reasoning-efforts contains a duplicate entry")
+		}
+		seen[token] = true
+		out = append(out, token)
+	}
+	return out, nil
 }
 
 // parseProtocol maps a configured protocol name to a translator format.
