@@ -2,9 +2,12 @@ package commandcode
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Synthetic workspace facts. The plugin never reads the host filesystem, git
@@ -18,6 +21,7 @@ const (
 
 type cliCacheControl struct {
 	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 type cliOutput struct {
@@ -137,7 +141,7 @@ func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) 
 	}
 
 	trimmed := bytes.TrimSpace(anthropicPayload)
-	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+	if len(trimmed) == 0 || trimmed[0] != '{' || !utf8.Valid(trimmed) || !json.Valid(trimmed) {
 		return nil, invalidRequest("anthropic payload must be a single JSON object")
 	}
 
@@ -168,7 +172,7 @@ func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) 
 		return nil, err
 	}
 
-	messages, err := buildMessages(payload.Messages)
+	messages, err := buildMessages(payload.Messages, opts.Capabilities)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +309,7 @@ func buildTools(raw []antTool) ([]cliTool, error) {
 // "tool" role messages, remaining user parts stay a "user" message, and every
 // assistant tool_use is a full "tool-call" block. toolName for a tool_result is
 // resolved from the tool_use id found in the same payload.
-func buildMessages(messages []antMessage) ([]cliMessage, error) {
+func buildMessages(messages []antMessage, caps Capabilities) ([]cliMessage, error) {
 	names := map[string]string{}
 	for _, msg := range messages {
 		if msg.Role != "assistant" {
@@ -338,11 +342,15 @@ func buildMessages(messages []antMessage) ([]cliMessage, error) {
 		case "assistant":
 			wire := []cliBlock{}
 			for _, block := range blocks {
+				cacheControl, err := parseCacheControl(block.CacheControl)
+				if err != nil {
+					return nil, err
+				}
 				switch block.Type {
 				case "text":
-					wire = append(wire, cliBlock{Type: "text", Text: block.Text})
+					wire = append(wire, cliBlock{Type: "text", Text: block.Text, CacheControl: cacheControl})
 				case "thinking":
-					wire = append(wire, cliBlock{Type: "reasoning", Text: block.Thinking})
+					wire = append(wire, cliBlock{Type: "reasoning", Text: block.Thinking, CacheControl: cacheControl})
 				case "redacted_thinking":
 					return nil, unsupported("redacted_thinking cannot be represented")
 				case "tool_use":
@@ -353,7 +361,7 @@ func buildMessages(messages []antMessage) ([]cliMessage, error) {
 					if len(input) == 0 {
 						input = json.RawMessage(`{}`)
 					}
-					wire = append(wire, cliBlock{Type: "tool-call", ToolCallID: block.ID, ToolName: block.Name, Input: input})
+					wire = append(wire, cliBlock{Type: "tool-call", ToolCallID: block.ID, ToolName: block.Name, Input: input, CacheControl: cacheControl})
 				default:
 					return nil, unsupported("assistant block type is not supported")
 				}
@@ -363,20 +371,26 @@ func buildMessages(messages []antMessage) ([]cliMessage, error) {
 			userBlocks := []cliBlock{}
 			toolBlocks := []cliBlock{}
 			for _, block := range blocks {
+				cacheControl, err := parseCacheControl(block.CacheControl)
+				if err != nil {
+					return nil, err
+				}
 				switch block.Type {
 				case "text":
-					userBlocks = append(userBlocks, cliBlock{Type: "text", Text: block.Text})
+					userBlocks = append(userBlocks, cliBlock{Type: "text", Text: block.Text, CacheControl: cacheControl})
 				case "image":
-					img, err := buildImage(block.Source)
+					img, err := buildImage(block.Source, caps)
 					if err != nil {
 						return nil, err
 					}
+					img.CacheControl = cacheControl
 					userBlocks = append(userBlocks, img)
 				case "tool_result":
 					tool, err := buildToolResult(block, names)
 					if err != nil {
 						return nil, err
 					}
+					tool.CacheControl = cacheControl
 					toolBlocks = append(toolBlocks, tool)
 				default:
 					return nil, unsupported("user block type is not supported")
@@ -447,18 +461,76 @@ func buildToolResult(block antBlock, names map[string]string) (cliBlock, error) 
 	}, nil
 }
 
-func buildImage(source *antImageSource) (cliBlock, error) {
+func buildImage(source *antImageSource, caps Capabilities) (cliBlock, error) {
 	if source == nil || source.Type != "base64" {
 		return cliBlock{}, unsupported("only inline base64 images are supported")
 	}
+	if !caps.Vision {
+		return cliBlock{}, unsupported("the selected model does not support image content")
+	}
 	if source.MediaType == "" || source.Data == "" {
 		return cliBlock{}, invalidRequest("image source requires media_type and data")
+	}
+	if err := validateInlineImage(source.MediaType, source.Data); err != nil {
+		return cliBlock{}, err
 	}
 	return cliBlock{
 		Type:     "image",
 		Image:    "data:" + source.MediaType + ";base64," + source.Data,
 		MimeType: source.MediaType,
 	}, nil
+}
+
+// maxInlineImageBytes bounds the decoded inline image payload accepted from a
+// client. Larger images are rejected locally instead of being forwarded.
+const maxInlineImageBytes = 8 << 20
+
+// validateInlineImage checks an inline base64 image without fetching anything:
+// the media type must be a legal image type, the payload must decode as base64
+// and the decoded size must stay within the cap.
+func validateInlineImage(mime, data string) error {
+	if !validImageMime(mime) {
+		return unsupported("image mime type is not supported")
+	}
+	decoded, err := decodeBase64(data)
+	if err != nil {
+		return invalidRequest("image data is not valid base64")
+	}
+	if len(decoded) > maxInlineImageBytes {
+		return unsupported("inline image exceeds the maximum size")
+	}
+	return nil
+}
+
+func validImageMime(mime string) bool {
+	slash := strings.IndexByte(mime, '/')
+	if slash <= 0 || slash == len(mime)-1 {
+		return false
+	}
+	if !strings.EqualFold(mime[:slash], "image") {
+		return false
+	}
+	return isMimeToken(mime[:slash]) && isMimeToken(mime[slash+1:])
+}
+
+func isMimeToken(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$&^_.+-", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func decodeBase64(payload string) ([]byte, error) {
+	if decoded, err := base64.StdEncoding.DecodeString(payload); err == nil {
+		return decoded, nil
+	}
+	return base64.RawStdEncoding.DecodeString(payload)
 }
 
 func parseCacheControl(raw json.RawMessage) (*cliCacheControl, error) {
@@ -471,6 +543,11 @@ func parseCacheControl(raw json.RawMessage) (*cliCacheControl, error) {
 	}
 	if cc.Type != "ephemeral" {
 		return nil, unsupported("cache_control type is not supported")
+	}
+	switch cc.TTL {
+	case "", "5m", "1h":
+	default:
+		return nil, unsupported("cache_control ttl is not supported")
 	}
 	return &cc, nil
 }

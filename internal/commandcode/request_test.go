@@ -240,3 +240,32 @@ func TestBuildRequestClampsDefaultToCap(t *testing.T) {
 		t.Fatalf("max_tokens = %v, want clamped 4096", got)
 	}
 }
+
+// A legal cache_control ttl (5m/1h) is preserved to the wire rather than
+// dropped, on system and message text blocks alike.
+func TestBuildRequestCacheControlTTL(t *testing.T) {
+	payload := `{
+	  "model":"m",
+	  "system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+	  "messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]
+	}`
+	obj := mustBuild(t, payload, RequestOptions{Model: "native/m", ThreadID: validUUID})
+	params := obj["params"].(map[string]any)
+
+	sys := params["system"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)
+	if sys["type"] != "ephemeral" || sys["ttl"] != "1h" {
+		t.Fatalf("system cache_control = %v", sys)
+	}
+	msg := params["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	cc := msg["cache_control"].(map[string]any)
+	if cc["type"] != "ephemeral" || cc["ttl"] != "5m" {
+		t.Fatalf("message cache_control = %v", cc)
+	}
+}
+
+func TestBuildRequestRejectsIllegalTTL(t *testing.T) {
+	payload := `{"model":"m","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"2h"}}],"messages":[]}`
+	if _, err := BuildRequest([]byte(payload), RequestOptions{Model: "native/m", ThreadID: validUUID}); err == nil {
+		t.Fatalf("illegal cache_control ttl must be rejected")
+	}
+}

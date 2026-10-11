@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 )
 
 // ValidateClientRequest inspects a raw client request (OpenAI Chat, Anthropic
@@ -42,7 +43,7 @@ func normalizeProtocol(protocol string) string {
 
 func decodeRequestObject(body []byte) (map[string]json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	if len(trimmed) == 0 || trimmed[0] != '{' || !utf8.Valid(trimmed) {
 		return nil, invalidRequest("request body must be a JSON object")
 	}
 	var obj map[string]json.RawMessage
@@ -72,25 +73,38 @@ func keySet(keys ...string) map[string]bool {
 	return set
 }
 
-// checkDeclaredLimit rejects an explicit output limit above the model cap.
+// checkDeclaredLimit validates an explicit output limit's type and value even
+// when the model cap is unknown, and rejects values above a known cap.
 func checkDeclaredLimit(obj map[string]json.RawMessage, caps Capabilities, keys ...string) error {
-	if caps.MaxOutputTokens <= 0 {
-		return nil
-	}
 	for _, key := range keys {
 		raw, ok := obj[key]
 		if !ok || !present(&raw) {
 			continue
 		}
-		value, ok := jsonInt64(raw)
-		if !ok || value < 0 {
+		value, okInt := jsonInt64(raw)
+		if !okInt || value < 0 {
 			return invalidRequest("output token limit must be a non-negative integer")
 		}
-		if value > caps.MaxOutputTokens {
+		if caps.MaxOutputTokens > 0 && value > caps.MaxOutputTokens {
 			return invalidRequest("output token limit exceeds the model limit")
 		}
 	}
 	return nil
+}
+
+// toolsNonEmpty reports whether the request declares at least one tool. A
+// malformed tools value is treated as non-empty so a "none" choice never
+// silently passes an unexpressible control.
+func toolsNonEmpty(obj map[string]json.RawMessage) bool {
+	raw, ok := obj["tools"]
+	if !ok || !present(&raw) {
+		return false
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return true
+	}
+	return len(tools) > 0
 }
 
 func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error {
@@ -116,7 +130,7 @@ func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error
 		}
 	}
 	if raw, ok := obj["tool_choice"]; ok && present(&raw) {
-		if err := validateToolChoice(raw); err != nil {
+		if err := validateToolChoice(raw, toolsNonEmpty(obj)); err != nil {
 			return err
 		}
 	}
@@ -151,7 +165,9 @@ func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error
 
 func validateTextResponseFormat(raw json.RawMessage) error {
 	var format struct {
-		Type string `json:"type"`
+		Type       string          `json:"type"`
+		JSONSchema json.RawMessage `json:"json_schema"`
+		Schema     json.RawMessage `json:"schema"`
 	}
 	if err := json.Unmarshal(raw, &format); err != nil {
 		return invalidRequest("response_format must be an object")
@@ -159,17 +175,29 @@ func validateTextResponseFormat(raw json.RawMessage) error {
 	if format.Type != "" && format.Type != "text" {
 		return unsupported("only plain text response_format is supported")
 	}
+	if present(&format.JSONSchema) || present(&format.Schema) {
+		return unsupported("structured response_format schemas are not supported")
+	}
 	return nil
 }
 
-func validateToolChoice(raw json.RawMessage) error {
+// validateToolChoice allows only unforced choices. "none" is only expressible
+// when the request declares no tools: with tools present the wire cannot
+// restrict the model, so accepting "none" would silently reverse the user's
+// intent and it is rejected instead.
+func validateToolChoice(raw json.RawMessage, hasTools bool) error {
 	if raw[0] == '"' {
 		var choice string
 		if err := json.Unmarshal(raw, &choice); err != nil {
 			return invalidRequest("tool_choice is malformed")
 		}
 		switch choice {
-		case "auto", "none":
+		case "auto":
+			return nil
+		case "none":
+			if hasTools {
+				return unsupported("tool_choice none with tools is not supported")
+			}
 			return nil
 		default:
 			return unsupported("forced tool_choice is not supported")
@@ -192,6 +220,26 @@ func validateChatTools(raw json.RawMessage) error {
 		if err := json.Unmarshal(typ, &kind); err != nil || kind != "function" {
 			return unsupported("only function tools are supported")
 		}
+		if function, ok := tool["function"]; ok && present(&function) {
+			if err := rejectStrictTool(function); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// rejectStrictTool rejects a JSON-schema "strict" control the CLI wire cannot
+// express. strict=false is a no-op and is left alone.
+func rejectStrictTool(function json.RawMessage) error {
+	var schema struct {
+		Strict *bool `json:"strict"`
+	}
+	if err := json.Unmarshal(function, &schema); err != nil {
+		return nil
+	}
+	if schema.Strict != nil && *schema.Strict {
+		return unsupported("strict function schemas are not supported")
 	}
 	return nil
 }
@@ -200,6 +248,9 @@ func validateChatMessages(raw json.RawMessage, caps Capabilities) error {
 	var messages []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &messages); err != nil {
 		return invalidRequest("messages must be an array")
+	}
+	if len(messages) == 0 {
+		return invalidRequest("messages must not be empty")
 	}
 	for _, message := range messages {
 		roleRaw, ok := message["role"]
@@ -308,14 +359,25 @@ func validateChatImage(raw json.RawMessage, caps Capabilities) error {
 	return validateDataImageURL(image.URL, caps)
 }
 
+// validateDataImageURL accepts only inline base64 image data URLs: it checks the
+// media type, the base64 payload and a decoded size cap, without fetching
+// anything.
 func validateDataImageURL(url string, caps Capabilities) error {
 	if !strings.HasPrefix(url, "data:") {
 		return unsupported("remote image URLs are not supported")
 	}
+	comma := strings.IndexByte(url, ',')
+	if comma < 0 {
+		return invalidRequest("image data URL is malformed")
+	}
+	meta := url[len("data:"):comma]
+	if !strings.HasSuffix(meta, ";base64") {
+		return invalidRequest("image data URL must be base64 encoded")
+	}
 	if !caps.Vision {
 		return unsupported("the selected model does not support image content")
 	}
-	return nil
+	return validateInlineImage(strings.TrimSuffix(meta, ";base64"), url[comma+1:])
 }
 
 func validateChatToolCalls(raw json.RawMessage) error {
@@ -340,27 +402,33 @@ func validateChatToolCalls(raw json.RawMessage) error {
 func validateAnthropic(obj map[string]json.RawMessage, caps Capabilities) error {
 	if err := rejectUnknownKeys(obj, keySet(
 		"model", "messages", "system", "tools", "tool_choice", "max_tokens",
-		"temperature", "stream", "thinking",
+		"temperature", "stream", "thinking", "output_config",
 	)); err != nil {
 		return err
 	}
 	if err := checkDeclaredLimit(obj, caps, "max_tokens"); err != nil {
 		return err
 	}
+
+	effort := ""
+	if raw, ok := obj["output_config"]; ok && present(&raw) {
+		resolved, err := validateOutputConfig(raw, caps)
+		if err != nil {
+			return err
+		}
+		effort = resolved
+	}
+
 	if raw, ok := obj["thinking"]; ok && present(&raw) {
-		if err := validateThinking(raw); err != nil {
+		if err := validateThinking(raw, effort, caps); err != nil {
 			return err
 		}
 	}
+
+	hasTools := toolsNonEmpty(obj)
 	if raw, ok := obj["tool_choice"]; ok && present(&raw) {
-		var choice struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(raw, &choice); err != nil {
-			return invalidRequest("tool_choice is malformed")
-		}
-		if choice.Type != "" && choice.Type != "auto" && choice.Type != "none" {
-			return unsupported("forced tool_choice is not supported")
+		if err := validateAnthropicToolChoice(raw, hasTools); err != nil {
+			return err
 		}
 	}
 	if raw, ok := obj["system"]; ok && present(&raw) {
@@ -379,21 +447,98 @@ func validateAnthropic(obj map[string]json.RawMessage, caps Capabilities) error 
 	return invalidRequest("messages are required")
 }
 
-// validateThinking rejects a fixed thinking budget: the wire carries only a
-// reasoning effort, so a token budget cannot be mapped losslessly.
-func validateThinking(raw json.RawMessage) error {
+// validateOutputConfig permits only the effort field and requires the effort to
+// match the model capabilities, so no unexpressible nested field is dropped.
+func validateOutputConfig(raw json.RawMessage, caps Capabilities) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "", invalidRequest("output_config must be an object")
+	}
+	for key := range fields {
+		if key != "effort" {
+			return "", unsupported("output_config field is not supported")
+		}
+	}
+	effortRaw, ok := fields["effort"]
+	if !ok || !present(&effortRaw) {
+		return "", nil
+	}
+	var effort string
+	if err := json.Unmarshal(effortRaw, &effort); err != nil || effort == "" {
+		return "", invalidRequest("output_config.effort must be a string")
+	}
+	if !containsString(caps.ReasoningEfforts, effort) {
+		return "", &Error{Code: CodeReasoningEffort, Message: "reasoning effort is not supported by the selected model", HTTPStatus: 400}
+	}
+	return effort, nil
+}
+
+// validateThinking accepts only configurations the CLI wire can express:
+// disabled requires the model to advertise a "none" effort, adaptive requires
+// an explicit reasoning effort already provided, and a fixed budget is
+// rejected because it cannot be mapped losslessly.
+func validateThinking(raw json.RawMessage, effort string, caps Capabilities) error {
 	var thinking struct {
-		Type string `json:"type"`
+		Type         string          `json:"type"`
+		BudgetTokens json.RawMessage `json:"budget_tokens"`
 	}
 	if err := json.Unmarshal(raw, &thinking); err != nil {
 		return invalidRequest("thinking must be an object")
 	}
 	switch thinking.Type {
-	case "disabled", "":
+	case "disabled":
+		if !containsString(caps.ReasoningEfforts, "none") {
+			return unsupported("the model cannot be forced to disable thinking")
+		}
+		return nil
+	case "adaptive":
+		if effort == "" {
+			return unsupported("adaptive thinking requires an explicit reasoning effort")
+		}
+		if present(&thinking.BudgetTokens) {
+			return unsupported("a fixed thinking budget cannot be mapped to a reasoning effort")
+		}
+		return nil
+	case "enabled":
+		return unsupported("a fixed thinking budget cannot be mapped to a reasoning effort")
+	default:
+		return unsupported("thinking type is not supported")
+	}
+}
+
+func validateAnthropicToolChoice(raw json.RawMessage, hasTools bool) error {
+	var choice struct {
+		Type                   string          `json:"type"`
+		DisableParallelToolUse json.RawMessage `json:"disable_parallel_tool_use"`
+	}
+	if err := json.Unmarshal(raw, &choice); err != nil {
+		return invalidRequest("tool_choice is malformed")
+	}
+	if enabled, ok := boolFlag(choice.DisableParallelToolUse); ok && enabled {
+		return unsupported("disabling parallel tool calls is not supported")
+	}
+	switch choice.Type {
+	case "", "auto":
+		return nil
+	case "none":
+		if hasTools {
+			return unsupported("tool_choice none with tools is not supported")
+		}
 		return nil
 	default:
-		return unsupported("fixed thinking budgets cannot be mapped to a reasoning effort")
+		return unsupported("forced tool_choice is not supported")
 	}
+}
+
+func boolFlag(raw json.RawMessage) (bool, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false, false
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, true
+	}
+	return value, true
 }
 
 func validateAnthropicSystem(raw json.RawMessage, caps Capabilities) error {
@@ -412,8 +557,22 @@ func validateAnthropicSystem(raw json.RawMessage, caps Capabilities) error {
 		if typ != "text" {
 			return unsupported("system block type is not supported")
 		}
+		if err := validateCacheControlField(block); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// validateCacheControlField rejects an unexpressible cache marker; valid ones
+// (ephemeral, optionally ttl 5m/1h) are preserved by BuildRequest.
+func validateCacheControlField(block map[string]json.RawMessage) error {
+	raw, ok := block["cache_control"]
+	if !ok || !present(&raw) {
+		return nil
+	}
+	_, err := parseCacheControl(raw)
+	return err
 }
 
 func validateAnthropicTools(raw json.RawMessage) error {
@@ -436,6 +595,9 @@ func validateAnthropicMessages(raw json.RawMessage, caps Capabilities) error {
 	var messages []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &messages); err != nil {
 		return invalidRequest("messages must be an array")
+	}
+	if len(messages) == 0 {
+		return invalidRequest("messages must not be empty")
 	}
 	for _, message := range messages {
 		roleRaw, ok := message["role"]
@@ -477,6 +639,9 @@ func validateAnthropicBlocks(raw json.RawMessage, role string, caps Capabilities
 		if err := json.Unmarshal(typRaw, &typ); err != nil {
 			return unsupported("content block type is not supported")
 		}
+		if err := validateCacheControlField(block); err != nil {
+			return err
+		}
 		switch typ {
 		case "text", "tool_use", "tool_result":
 			if typ == "tool_result" {
@@ -505,6 +670,12 @@ func validateAnthropicBlocks(raw json.RawMessage, role string, caps Capabilities
 }
 
 func validateToolResultBlock(block map[string]json.RawMessage) error {
+	if isError, ok := block["is_error"]; ok && present(&isError) {
+		var flag bool
+		if err := json.Unmarshal(isError, &flag); err == nil && flag {
+			return unsupported("tool_result error markers cannot be represented")
+		}
+	}
 	content, ok := block["content"]
 	if !ok || bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
 		return nil
@@ -533,7 +704,9 @@ func validateAnthropicImage(raw json.RawMessage, caps Capabilities) error {
 		return invalidRequest("image source is required")
 	}
 	var source struct {
-		Type string `json:"type"`
+		Type      string `json:"type"`
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &source); err != nil {
 		return invalidRequest("image source is malformed")
@@ -544,7 +717,7 @@ func validateAnthropicImage(raw json.RawMessage, caps Capabilities) error {
 	if !caps.Vision {
 		return unsupported("the selected model does not support image content")
 	}
-	return nil
+	return validateInlineImage(source.MediaType, source.Data)
 }
 
 func validateResponses(obj map[string]json.RawMessage, caps Capabilities) error {
@@ -571,18 +744,25 @@ func validateResponses(obj map[string]json.RawMessage, caps Capabilities) error 
 	if raw, ok := obj["text"]; ok && present(&raw) {
 		var payload struct {
 			Format *struct {
-				Type string `json:"type"`
+				Type       string          `json:"type"`
+				JSONSchema json.RawMessage `json:"json_schema"`
+				Schema     json.RawMessage `json:"schema"`
 			} `json:"format"`
 		}
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			return invalidRequest("text must be an object")
 		}
-		if payload.Format != nil && payload.Format.Type != "" && payload.Format.Type != "text" {
-			return unsupported("only plain text output format is supported")
+		if payload.Format != nil {
+			if payload.Format.Type != "" && payload.Format.Type != "text" {
+				return unsupported("only plain text output format is supported")
+			}
+			if present(&payload.Format.JSONSchema) || present(&payload.Format.Schema) {
+				return unsupported("structured output schemas are not supported")
+			}
 		}
 	}
 	if raw, ok := obj["tool_choice"]; ok && present(&raw) {
-		if err := validateToolChoice(raw); err != nil {
+		if err := validateToolChoice(raw, toolsNonEmpty(obj)); err != nil {
 			return err
 		}
 	}
@@ -611,6 +791,12 @@ func validateResponsesTools(raw json.RawMessage) error {
 		if err := json.Unmarshal(typ, &kind); err != nil || kind != "function" {
 			return unsupported("only function tools are supported")
 		}
+		if strict, ok := tool["strict"]; ok && present(&strict) {
+			var flag bool
+			if json.Unmarshal(strict, &flag) == nil && flag {
+				return unsupported("strict function schemas are not supported")
+			}
+		}
 	}
 	return nil
 }
@@ -622,6 +808,9 @@ func validateResponsesInput(raw json.RawMessage, caps Capabilities) error {
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return invalidRequest("input must be a string or an array of items")
+	}
+	if len(items) == 0 {
+		return invalidRequest("input must not be empty")
 	}
 	for _, item := range items {
 		var typ string

@@ -28,7 +28,11 @@ func jsonInt64(raw json.RawMessage) (int64, bool) {
 }
 
 func present(raw *json.RawMessage) bool {
-	return raw != nil && !bytes.Equal(bytes.TrimSpace(*raw), []byte("null"))
+	if raw == nil {
+		return false
+	}
+	trimmed := bytes.TrimSpace(*raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 func parseToken(raw json.RawMessage) (int64, error) {

@@ -31,14 +31,14 @@ func TestValidateClientRequestRoutes(t *testing.T) {
 // and inline images are accepted; forced choices, remote images and structured
 // output are rejected rather than silently dropped.
 func TestValidateClientRequestFeatures(t *testing.T) {
-	caps := Capabilities{Vision: true, ReasoningEfforts: []string{"low", "high"}, MaxOutputTokens: 64000}
+	caps := Capabilities{Vision: true, ReasoningEfforts: []string{"none", "low", "high"}, MaxOutputTokens: 64000}
 	ok := []struct {
 		protocol string
 		body     string
 	}{
 		{"openai", `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"tool_choice":"auto","reasoning_effort":"high","n":1,"response_format":{"type":"text"}}`},
 		{"claude", `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"ok"}]}]}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"tool_choice":{"type":"auto"},"thinking":{"type":"disabled"}}`},
-		{"openai-response", `{"input":[{"type":"function_call_output","call_id":"c","output":"x"}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":"none","reasoning":{"effort":"low"}}`},
+		{"openai-response", `{"input":[{"type":"function_call_output","call_id":"c","output":"x"}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":"auto","reasoning":{"effort":"low"}}`},
 	}
 	for _, tc := range ok {
 		if err := ValidateClientRequest([]byte(tc.body), tc.protocol, caps); err != nil {
