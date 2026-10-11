@@ -178,6 +178,12 @@ func TestResponseErrors(t *testing.T) {
 	if _, err := r2.Apply(Event{Type: "finish", FinishReason: "stop", Usage: incomplete}); err == nil {
 		t.Fatalf("incomplete usage must fail closed")
 	}
+	// A fabricated Complete flag must not bypass the math invariants.
+	rFake := NewResponse("m")
+	fabricated := &Usage{InputTokens: 10, OutputTokens: 4, TotalTokens: 99, Complete: true}
+	if _, err := rFake.Apply(Event{Type: "finish", FinishReason: "stop", Usage: fabricated}); err == nil {
+		t.Fatalf("fabricated complete usage must fail the invariant check")
+	}
 	r3 := NewResponse("m")
 	if _, err := r3.Apply(Event{Type: "finish", FinishReason: "stop", RawFinishReason: "end_turn", Usage: sampleUsage()}); err != nil {
 		t.Fatal(err)
@@ -185,4 +191,34 @@ func TestResponseErrors(t *testing.T) {
 	if _, err := r3.Apply(Event{Type: "text", Text: "late"}); err == nil {
 		t.Fatalf("apply after completion must fail")
 	}
+}
+
+func TestResponseIDIsRandom(t *testing.T) {
+	first := NewResponse("m").id
+	second := NewResponse("m").id
+	if first == second {
+		t.Fatalf("response ids must be unique per request")
+	}
+	if !strings.HasPrefix(first, "chatcmpl-") || len(first) <= len("chatcmpl-") {
+		t.Fatalf("unexpected id %q", first)
+	}
+}
+
+func TestResponseBounds(t *testing.T) {
+	r := NewResponse("m")
+	for i := 0; i < maxResponseToolCalls; i++ {
+		if _, err := r.Apply(Event{Type: "tool-call", ToolID: "t", ToolName: "f", ToolInput: json.RawMessage(`{}`)}); err != nil {
+			t.Fatalf("tool %d: %v", i, err)
+		}
+	}
+	_, err := r.Apply(Event{Type: "tool-call", ToolID: "t", ToolName: "f", ToolInput: json.RawMessage(`{}`)})
+	assertCode(t, err, CodeResponseTooLarge)
+
+	oversized := make([]byte, maxToolArgumentsBytes+1)
+	for i := range oversized {
+		oversized[i] = 'a'
+	}
+	r2 := NewResponse("m")
+	_, err = r2.Apply(Event{Type: "tool-call", ToolID: "t", ToolName: "f", ToolInput: json.RawMessage(oversized)})
+	assertCode(t, err, CodeResponseTooLarge)
 }

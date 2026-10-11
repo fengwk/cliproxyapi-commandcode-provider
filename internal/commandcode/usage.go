@@ -50,6 +50,7 @@ type usageDetailsWire struct {
 
 type outputDetailsWire struct {
 	ReasoningTokens *json.RawMessage `json:"reasoningTokens"`
+	TextTokens      *json.RawMessage `json:"textTokens"`
 }
 
 type totalUsageWire struct {
@@ -61,10 +62,12 @@ type totalUsageWire struct {
 }
 
 // normalizeFinishUsage turns one finish event's totalUsage into a canonical
-// Usage. Missing cache-write buckets may be filled once from a supplement
-// event; anything else missing, conflicting, negative, fractional or
-// overflowing fails closed with an identifiable accounting error. An absent
-// bucket is never treated as an explicit zero.
+// Usage. The inclusive input total and the explicitly present buckets are used
+// to recover exactly one missing bucket; two or more missing buckets are
+// ambiguous and fail closed. A cache-write supplement fills only an absent
+// bucket and a conflicting supplement is rejected. Absent buckets are never
+// silently treated as zero and reasoning is only derived when the remaining
+// output bucket pins it uniquely.
 func normalizeFinishUsage(raw json.RawMessage, supplement *int64) (Usage, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return Usage{}, accountingError("finish event had no usage")
@@ -89,56 +92,125 @@ func normalizeFinishUsage(raw json.RawMessage, supplement *int64) (Usage, error)
 		return Usage{}, err
 	}
 
-	if wire.InputTokenDetails == nil {
-		return Usage{}, accountingError("usage input token details are missing")
-	}
-	if !present(wire.InputTokenDetails.NoCacheTokens) {
-		return Usage{}, accountingError("usage uncached input tokens are missing")
-	}
-	noCache, err := parseToken(*wire.InputTokenDetails.NoCacheTokens)
-	if err != nil {
-		return Usage{}, err
-	}
-	if !present(wire.InputTokenDetails.CacheReadTokens) {
-		return Usage{}, accountingError("usage cache read tokens are missing")
-	}
-	cacheRead, err := parseToken(*wire.InputTokenDetails.CacheReadTokens)
-	if err != nil {
-		return Usage{}, err
-	}
-
-	var cacheWrite int64
-	if present(wire.InputTokenDetails.CacheWriteTokens) {
-		cacheWrite, err = parseToken(*wire.InputTokenDetails.CacheWriteTokens)
-		if err != nil {
-			return Usage{}, err
+	var (
+		noCache, cacheRead, cacheWrite        int64
+		haveNoCache, haveCacheRead, haveCache bool
+	)
+	if wire.InputTokenDetails != nil {
+		details := wire.InputTokenDetails
+		if present(details.NoCacheTokens) {
+			if noCache, err = parseToken(*details.NoCacheTokens); err != nil {
+				return Usage{}, err
+			}
+			haveNoCache = true
 		}
+		if present(details.CacheReadTokens) {
+			if cacheRead, err = parseToken(*details.CacheReadTokens); err != nil {
+				return Usage{}, err
+			}
+			haveCacheRead = true
+		}
+		if present(details.CacheWriteTokens) {
+			if cacheWrite, err = parseToken(*details.CacheWriteTokens); err != nil {
+				return Usage{}, err
+			}
+			haveCache = true
+		}
+	}
+	if haveCache {
 		if supplement != nil && *supplement != cacheWrite {
 			return Usage{}, usageConflict("cache write tokens conflict with the stream supplements")
 		}
 	} else if supplement != nil {
 		cacheWrite = *supplement
+		haveCache = true
+	}
+
+	presentBuckets := make([]int64, 0, 3)
+	missing := 0
+	if haveNoCache {
+		presentBuckets = append(presentBuckets, noCache)
 	} else {
-		return Usage{}, accountingError("usage cache write tokens are missing")
+		missing++
+	}
+	if haveCacheRead {
+		presentBuckets = append(presentBuckets, cacheRead)
+	} else {
+		missing++
+	}
+	if haveCache {
+		presentBuckets = append(presentBuckets, cacheWrite)
+	} else {
+		missing++
 	}
 
-	if wire.OutputTokenDetails == nil || !present(wire.OutputTokenDetails.ReasoningTokens) {
-		return Usage{}, accountingError("usage reasoning tokens are missing")
-	}
-	reasoning, err := parseToken(*wire.OutputTokenDetails.ReasoningTokens)
-	if err != nil {
-		return Usage{}, err
-	}
-
-	sum, ok := addNonNegative(noCache, cacheRead, cacheWrite)
+	sum, ok := addNonNegative(presentBuckets...)
 	if !ok {
 		return Usage{}, usageInvalid("usage input partitions overflow int64")
 	}
-	if sum != inputTokens {
-		return Usage{}, usageConflict("usage input partitions do not add up to the input total")
+	switch missing {
+	case 0:
+		if sum != inputTokens {
+			return Usage{}, usageConflict("usage input partitions do not add up to the input total")
+		}
+	case 1:
+		if sum > inputTokens {
+			return Usage{}, usageConflict("usage input partitions exceed the input total")
+		}
+		derived := inputTokens - sum
+		switch {
+		case !haveNoCache:
+			noCache = derived
+		case !haveCacheRead:
+			cacheRead = derived
+		default:
+			cacheWrite = derived
+		}
+	default:
+		return Usage{}, accountingError("usage cache partition is ambiguous")
 	}
-	if reasoning > outputTokens {
-		return Usage{}, usageConflict("usage reasoning tokens exceed the output total")
+
+	var (
+		reasoning      int64
+		haveReasoning  bool
+		textTokens     int64
+		haveOutputText bool
+	)
+	if wire.OutputTokenDetails != nil {
+		details := wire.OutputTokenDetails
+		if present(details.ReasoningTokens) {
+			if reasoning, err = parseToken(*details.ReasoningTokens); err != nil {
+				return Usage{}, err
+			}
+			haveReasoning = true
+		}
+		if present(details.TextTokens) {
+			if textTokens, err = parseToken(*details.TextTokens); err != nil {
+				return Usage{}, err
+			}
+			haveOutputText = true
+		}
+	}
+	switch {
+	case haveReasoning && haveOutputText:
+		reasoningAndText, ok := addNonNegative(reasoning, textTokens)
+		if !ok {
+			return Usage{}, usageInvalid("usage output partitions overflow int64")
+		}
+		if reasoningAndText != outputTokens {
+			return Usage{}, usageConflict("usage output partitions do not add up to the output total")
+		}
+	case haveReasoning:
+		if reasoning > outputTokens {
+			return Usage{}, usageConflict("usage reasoning tokens exceed the output total")
+		}
+	case haveOutputText:
+		if textTokens > outputTokens {
+			return Usage{}, usageConflict("usage output tokens exceed the output total")
+		}
+		reasoning = outputTokens - textTokens
+	default:
+		return Usage{}, accountingError("usage reasoning tokens are missing")
 	}
 
 	if inputTokens > math.MaxInt64-outputTokens {
@@ -188,26 +260,35 @@ func addInt64(a, b int64) (int64, bool) {
 	return a + b, true
 }
 
-// validated reports whether a Usage is internally consistent. Complete is only
-// meaningful when the partitions agree with the inclusive totals.
+// validated reports whether a Usage is internally consistent: non-negative
+// buckets, cache read and write within the inclusive input total, reasoning
+// within output, and the total equal to input plus output without overflow.
 func (u Usage) validated() bool {
 	if u.InputTokens < 0 || u.OutputTokens < 0 || u.TotalTokens < 0 ||
 		u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 || u.ReasoningTokens < 0 {
 		return false
 	}
-	if u.CacheReadTokens > u.InputTokens || u.CacheWriteTokens > u.InputTokens {
+	if u.CacheReadTokens > u.InputTokens {
+		return false
+	}
+	if u.CacheWriteTokens > u.InputTokens-u.CacheReadTokens {
 		return false
 	}
 	if u.ReasoningTokens > u.OutputTokens {
 		return false
 	}
-	return u.TotalTokens == u.InputTokens+u.OutputTokens
+	total, ok := addInt64(u.InputTokens, u.OutputTokens)
+	return ok && u.TotalTokens == total
 }
 
-// Add sums two per-turn usages, guarding int64 overflow. Each turn is added
-// exactly once; Complete holds only while both sides were complete and the
-// result stays self-consistent.
+// Add sums two per-turn usages, guarding int64 overflow. Both operands are
+// validated first so opposing negatives cannot cancel into a plausible sum;
+// each turn is added exactly once and Complete holds only while both sides were
+// complete and the result stays self-consistent.
 func (u Usage) Add(other Usage) (Usage, error) {
+	if !u.validated() || !other.validated() {
+		return Usage{}, usageInvalid("cannot add invalid usage")
+	}
 	sum := Usage{Complete: u.Complete && other.Complete}
 	var ok bool
 	if sum.InputTokens, ok = addInt64(u.InputTokens, other.InputTokens); !ok {

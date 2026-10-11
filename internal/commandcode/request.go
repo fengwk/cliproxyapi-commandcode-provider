@@ -136,7 +136,12 @@ func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) 
 		return nil, invalidRequest("model is required")
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(anthropicPayload))
+	trimmed := bytes.TrimSpace(anthropicPayload)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return nil, invalidRequest("anthropic payload must be a single JSON object")
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.UseNumber()
 	var payload antPayload
 	if err := dec.Decode(&payload); err != nil {

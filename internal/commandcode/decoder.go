@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // Stream bounds protect against malformed or hostile upstream NDJSON. A single
@@ -207,6 +208,9 @@ type rawEvent struct {
 }
 
 func (d *Decoder) handleLine(line []byte) (*Event, bool, error) {
+	if !utf8.Valid(line) {
+		return nil, false, &Error{Code: CodeContentNotDecodable, Message: "upstream event is not valid UTF-8", HTTPStatus: 502}
+	}
 	var event rawEvent
 	if err := json.Unmarshal(line, &event); err != nil {
 		return nil, false, malformedEventError()
@@ -292,35 +296,78 @@ func (d *Decoder) handleFinish(event rawEvent) (*Event, bool, error) {
 	} else if event.FinishReason != nil {
 		raw = *event.FinishReason
 	}
-	finish := normalizeFinishReason(raw)
+	normalized := ""
+	if event.FinishReason != nil {
+		normalized = *event.FinishReason
+	}
+	// A pause_turn in either field is a protocol continuation and always wins;
+	// otherwise the normalized AI-SDK reason wins, with the provider-specific
+	// raw value as the fallback. A missing or unrecognized terminal reason is an
+	// explicit error, never silently declared a successful stop.
+	var canonical string
+	if isPauseReason(normalized) || isPauseReason(raw) {
+		canonical = "pause_turn"
+	} else {
+		mapped, ok := canonicalFinishReason(normalized, raw)
+		if !ok {
+			return nil, false, terminalUnknownError()
+		}
+		canonical = mapped
+	}
 	return &Event{
 		Type:            "finish",
-		FinishReason:    finish,
+		FinishReason:    canonical,
 		RawFinishReason: raw,
 		Usage:           &usage,
 	}, true, nil
 }
 
-func normalizeFinishReason(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "tool_use", "tool-calls", "tool_calls", "tool-call":
-		return "tool_calls"
-	case "length", "max_tokens":
-		return "length"
-	case "pause_turn":
-		return "pause_turn"
+func canonicalFinishReason(normalized, raw string) (string, bool) {
+	for _, candidate := range []string{normalized, raw} {
+		if canonical, ok := mapFinishReason(candidate); ok {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+func isPauseReason(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "pause_turn", "pause-turn":
+		return true
 	default:
-		return "stop"
+		return false
 	}
 }
 
+func mapFinishReason(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "stop", "end_turn", "end-turn", "stop_sequence", "stop-sequence":
+		return "stop", true
+	case "tool-calls", "tool_calls", "tool_use", "tool-use", "tool_call", "function_call", "function-call":
+		return "tool_calls", true
+	case "length", "max_tokens", "max-tokens", "max_output_tokens", "max-output-tokens":
+		return "length", true
+	case "content-filter", "content_filter":
+		return "content_filter", true
+	case "pause_turn", "pause-turn":
+		return "pause_turn", true
+	default:
+		return "", false
+	}
+}
+
+// normalizeToolInput preserves the client's JSON structure. Objects and arrays
+// are returned unchanged; a string is decoded exactly once and must contain a
+// JSON object or array. Scalars are explicitly unsupported, and single-element
+// arrays are never unwrapped into a different schema.
 func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+	if len(trimmed) == 0 {
 		return nil, malformedEventError()
 	}
 	switch trimmed[0] {
-	case '{':
+	case '{', '[':
 		return json.RawMessage(trimmed), nil
 	case '"':
 		var s string
@@ -328,18 +375,12 @@ func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
 			return nil, malformedEventError()
 		}
 		inner := bytes.TrimSpace([]byte(s))
-		if len(inner) == 0 || inner[0] != '{' || !json.Valid(inner) {
-			return nil, malformedEventError()
+		if len(inner) == 0 || (inner[0] != '{' && inner[0] != '[') || !json.Valid(inner) {
+			return nil, unsupported("tool input string is not a JSON object or array")
 		}
 		return json.RawMessage(inner), nil
-	case '[':
-		var arr []json.RawMessage
-		if err := json.Unmarshal(trimmed, &arr); err != nil || len(arr) != 1 {
-			return nil, malformedEventError()
-		}
-		return normalizeToolInput(arr[0])
 	default:
-		return nil, malformedEventError()
+		return nil, unsupported("tool input must be a JSON object or array")
 	}
 }
 

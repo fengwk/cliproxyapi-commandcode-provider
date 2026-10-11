@@ -1,9 +1,19 @@
 package commandcode
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"strings"
 	"time"
+)
+
+// Response accumulation bounds keep one logical request (up to six continued
+// turns) within a fixed memory budget and reject pathological upstream output
+// with a typed error instead of growing without limit.
+const (
+	maxResponseContentBytes = 16 << 20 // total text + reasoning + tool arguments
+	maxResponseToolCalls    = 128
+	maxToolArgumentsBytes   = 1 << 20
 )
 
 type chatFunction struct {
@@ -99,17 +109,19 @@ type Response struct {
 	reasoning strings.Builder
 	toolCalls []plannedToolCall
 
-	usage       Usage
-	hasUsage    bool
-	finished    bool
-	finishCause string
+	usage        Usage
+	hasUsage     bool
+	finished     bool
+	finishCause  string
+	contentBytes int
 }
 
 // NewResponse starts an empty canonical Chat response for the public model id.
+// The id is random per request and carries no credential or session material.
 func NewResponse(model string) *Response {
 	return &Response{
 		model:   model,
-		id:      "chatcmpl-commandcode",
+		id:      "chatcmpl-" + rand.Text(),
 		created: time.Now().Unix(),
 	}
 }
@@ -125,21 +137,37 @@ func (r *Response) Apply(event Event) ([][]byte, error) {
 	}
 	switch event.Type {
 	case "text":
+		if err := r.reserveContent(len(event.Text)); err != nil {
+			return nil, err
+		}
 		r.text.WriteString(event.Text)
 		content := event.Text
 		return r.frame(chatDelta{Content: &content}, nil)
 	case "reasoning-delta":
+		if err := r.reserveContent(len(event.Text)); err != nil {
+			return nil, err
+		}
 		r.reasoning.WriteString(event.Text)
 		content := event.Text
 		return r.frame(chatDelta{ReasoningContent: &content}, nil)
 	case "reasoning-start", "reasoning-end":
 		return nil, nil
 	case "tool-call":
+		if len(r.toolCalls) >= maxResponseToolCalls {
+			return nil, responseTooLargeError()
+		}
+		arguments := string(event.ToolInput)
+		if len(arguments) > maxToolArgumentsBytes {
+			return nil, responseTooLargeError()
+		}
+		if err := r.reserveContent(len(arguments)); err != nil {
+			return nil, err
+		}
 		index := len(r.toolCalls)
 		r.toolCalls = append(r.toolCalls, plannedToolCall{
 			id:        event.ToolID,
 			name:      event.ToolName,
-			arguments: string(event.ToolInput),
+			arguments: arguments,
 		})
 		call := chatToolCall{
 			Index: index,
@@ -147,7 +175,7 @@ func (r *Response) Apply(event Event) ([][]byte, error) {
 			Type:  "function",
 			Function: chatFunction{
 				Name:      event.ToolName,
-				Arguments: string(event.ToolInput),
+				Arguments: arguments,
 			},
 		}
 		return r.frame(chatDelta{ToolCalls: []chatToolCall{call}}, nil)
@@ -158,11 +186,16 @@ func (r *Response) Apply(event Event) ([][]byte, error) {
 	}
 }
 
-func (r *Response) applyFinish(event Event) ([][]byte, error) {
-	if event.Usage == nil {
-		return nil, accountingError("finish event had no usage")
+func (r *Response) reserveContent(n int) error {
+	if n < 0 || r.contentBytes > maxResponseContentBytes-n {
+		return responseTooLargeError()
 	}
-	if !event.Usage.Complete {
+	r.contentBytes += n
+	return nil
+}
+
+func (r *Response) applyFinish(event Event) ([][]byte, error) {
+	if event.Usage == nil || !event.Usage.Complete || !event.Usage.validated() {
 		return nil, accountingError("finish usage is not complete")
 	}
 	if !r.hasUsage {
@@ -179,12 +212,12 @@ func (r *Response) applyFinish(event Event) ([][]byte, error) {
 	if event.RawFinishReason == "pause_turn" || event.FinishReason == "pause_turn" {
 		return nil, nil
 	}
+	if event.FinishReason == "" {
+		return nil, terminalUnknownError()
+	}
 
 	r.finished = true
 	r.finishCause = event.FinishReason
-	if r.finishCause == "" {
-		r.finishCause = "stop"
-	}
 
 	reason := r.finishCause
 	finishFrame, err := sseFrame(chatChunk{

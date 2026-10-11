@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -132,7 +133,7 @@ func TestDecoderFailClosed(t *testing.T) {
 		},
 		"tool-call bad input": {
 			stream: `{"type":"tool-call","toolCallId":"t","toolName":"f","input":"not json"}` + "\n" + fixtureFinish + "\n",
-			code:   CodeMalformedEvent,
+			code:   CodeUnsupported,
 		},
 		"tool-result unsupported": {
 			stream: `{"type":"tool-result","toolCallId":"t","toolName":"f"}` + "\n" + fixtureFinish + "\n",
@@ -226,19 +227,24 @@ func TestDecoderLineTooLong(t *testing.T) {
 	assertCode(t, err, CodeMalformedEvent)
 }
 
-// A cache-write supplement fills the missing bucket of the finish usage once.
+// A cache-write supplement fills the missing bucket of the finish usage, and
+// only then can the remaining bucket be derived. Without the supplement the
+// partition is ambiguous and must fail closed.
 func TestDecoderCacheWriteSupplement(t *testing.T) {
-	finish := `{"type":"finish","finishReason":"end_turn","totalUsage":{"inputTokens":3,"outputTokens":1,"inputTokenDetails":{"noCacheTokens":1,"cacheReadTokens":1},"outputTokenDetails":{"reasoningTokens":0}}}`
+	finish := `{"type":"finish","finishReason":"end_turn","totalUsage":{"inputTokens":3,"outputTokens":1,"inputTokenDetails":{"noCacheTokens":1},"outputTokenDetails":{"reasoningTokens":0}}}`
+	if _, err := drain(t, strings.NewReader(finish+"\n"), ""); err == nil {
+		t.Fatalf("ambiguous partition must fail without the supplement")
+	}
 	stream := `{"type":"cache-write-tokens","cacheWriteTokens":1}` + "\n" + finish + "\n"
 	events, err := drain(t, strings.NewReader(stream), "")
 	if err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	if len(events) != 1 || events[0].Usage.CacheWriteTokens != 1 || !events[0].Usage.Complete {
+	if len(events) != 1 || events[0].Usage.CacheWriteTokens != 1 || events[0].Usage.CacheReadTokens != 1 || !events[0].Usage.Complete {
 		t.Fatalf("events = %+v", events)
 	}
 
-	providerFinish := `{"type":"finish","finishReason":"end_turn","totalUsage":{"inputTokens":3,"outputTokens":1,"inputTokenDetails":{"noCacheTokens":1,"cacheReadTokens":1},"outputTokenDetails":{"reasoningTokens":0}}}`
+	providerFinish := finish
 	meta := `{"type":"provider-metadata","providerMetadata":{"anthropic":{"usage":{"cache_creation":{"ephemeral_1h_input_tokens":1}}}}}`
 	events, err = drain(t, strings.NewReader(meta+"\n"+providerFinish+"\n"), "")
 	if err != nil {
@@ -247,6 +253,106 @@ func TestDecoderCacheWriteSupplement(t *testing.T) {
 	if len(events) != 1 || events[0].Usage.CacheWriteTokens != 1 {
 		t.Fatalf("events = %+v", events)
 	}
+}
+
+// finishReason is the normalized AI-SDK terminal reason; rawFinishReason is the
+// provider-specific value. pause_turn keeps the stream going, a recognized
+// normalized value wins, and an unrecognized terminal reason is an explicit
+// error instead of a fabricated successful stop.
+func TestDecoderFinishReasons(t *testing.T) {
+	cases := map[string]struct {
+		finish     string
+		wantReason string
+		wantRaw    string
+		wantCode   string
+	}{
+		"normalized tool_calls with raw tool_use": {
+			finish:     `{"type":"finish","finishReason":"tool-calls","rawFinishReason":"tool_use","totalUsage":` + usageFragment + `}`,
+			wantReason: "tool_calls",
+			wantRaw:    "tool_use",
+		},
+		"normalized length wins over raw stop": {
+			finish:     `{"type":"finish","finishReason":"length","rawFinishReason":"end_turn","totalUsage":` + usageFragment + `}`,
+			wantReason: "length",
+			wantRaw:    "end_turn",
+		},
+		"raw pause_turn is a continuation": {
+			finish:     `{"type":"finish","finishReason":"stop","rawFinishReason":"pause_turn","totalUsage":` + usageFragment + `}`,
+			wantReason: "pause_turn",
+			wantRaw:    "pause_turn",
+		},
+		"unknown terminal reason": {
+			finish:   `{"type":"finish","finishReason":"other","totalUsage":` + usageFragment + `}`,
+			wantCode: CodeTerminalUnknown,
+		},
+		"content filter maps losslessly": {
+			finish:     `{"type":"finish","finishReason":"content-filter","totalUsage":` + usageFragment + `}`,
+			wantReason: "content_filter",
+			wantRaw:    "content-filter",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			events, err := drain(t, strings.NewReader(tc.finish+"\n"), "")
+			if tc.wantCode != "" {
+				assertCode(t, err, tc.wantCode)
+				return
+			}
+			if err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			if len(events) != 1 || events[0].FinishReason != tc.wantReason || events[0].RawFinishReason != tc.wantRaw {
+				t.Fatalf("events = %+v", events)
+			}
+		})
+	}
+}
+
+const usageFragment = `{"inputTokens":10,"outputTokens":4,"totalTokens":14,"inputTokenDetails":{"noCacheTokens":3,"cacheReadTokens":5,"cacheWriteTokens":2},"outputTokenDetails":{"reasoningTokens":2}}`
+
+// Invalid UTF-8 must be rejected explicitly instead of being silently replaced
+// with U+FFFD by JSON decoding, which would corrupt the content.
+func TestDecoderRejectsInvalidUTF8(t *testing.T) {
+	stream := append([]byte(`{"type":"text-delta","text":"`), 0xff, 0xfe)
+	stream = append(stream, []byte(`"}`+"\n")...)
+	_, err := drain(t, bytes.NewReader(stream), "")
+	assertCode(t, err, CodeContentNotDecodable)
+}
+
+// Tool input arrays keep their JSON shape; single-element arrays are not
+// unwrapped and strings are decoded exactly once.
+func TestDecoderPreservesToolInputStructure(t *testing.T) {
+	cases := map[string]string{
+		"array stays array":   `[{"a":1}]`,
+		"object stays object": `{"a":1}`,
+		"string decodes once": `"{\"a\":1}"`,
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			stream := `{"type":"tool-call","toolCallId":"t","toolName":"f","input":` + input + `}` + "\n" + fixtureFinish + "\n"
+			events, err := drain(t, strings.NewReader(stream), "")
+			if err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			want := input
+			if input[0] == '"' {
+				var decoded string
+				if err := json.Unmarshal([]byte(input), &decoded); err != nil {
+					t.Fatalf("bad test input: %v", err)
+				}
+				want = decoded
+			}
+			if string(events[0].ToolInput) != want {
+				t.Fatalf("ToolInput = %s, want %s", events[0].ToolInput, want)
+			}
+		})
+	}
+}
+
+func TestDecoderRejectsScalarToolInput(t *testing.T) {
+	stream := `{"type":"tool-call","toolCallId":"t","toolName":"f","input":42}` + "\n" + fixtureFinish + "\n"
+	_, err := drain(t, strings.NewReader(stream), "")
+	assertCode(t, err, CodeUnsupported)
 }
 
 type oneByteReader struct {

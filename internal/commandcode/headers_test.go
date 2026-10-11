@@ -73,3 +73,21 @@ func TestRequestHeadersRejectsBadThread(t *testing.T) {
 		t.Fatalf("expected error for empty key")
 	}
 }
+
+// Header injection must be rejected: a credential with control characters,
+// CR/LF or whitespace cannot be allowed into the Authorization value.
+func TestRequestHeadersRejectsInjection(t *testing.T) {
+	for name, key := range map[string]string{
+		"crlf":         "abc\r\nX-Injected: 1",
+		"newline":      "abc\nX: 1",
+		"control char": "abc\x00def",
+		"space":        "abc def",
+		"tab":          "abc\tdef",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := RequestHeaders(key, validUUID, false); err == nil {
+				t.Fatalf("key %q must be rejected", key)
+			}
+		})
+	}
+}

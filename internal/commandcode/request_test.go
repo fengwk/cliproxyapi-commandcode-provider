@@ -203,6 +203,21 @@ func TestBuildRequestRejects(t *testing.T) {
 			opts:    RequestOptions{Model: "native/m", ThreadID: validUUID, Capabilities: Capabilities{MaxOutputTokens: 8000}},
 			code:    CodeInvalidRequest,
 		},
+		"non object payload": {
+			payload: `[]`,
+			opts:    base,
+			code:    CodeInvalidRequest,
+		},
+		"trailing json": {
+			payload: `{"model":"m","messages":[]}{"extra":1}`,
+			opts:    base,
+			code:    CodeInvalidRequest,
+		},
+		"trailing garbage": {
+			payload: `{"model":"m","messages":[]} nonsense`,
+			opts:    base,
+			code:    CodeInvalidRequest,
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

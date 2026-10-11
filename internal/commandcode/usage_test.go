@@ -42,14 +42,56 @@ func TestNormalizeUsageDerivesTotal(t *testing.T) {
 	}
 }
 
+// A single missing bucket is recovered from the inclusive total; the reviewer's
+// worked examples must all succeed without fabricating an absent zero.
+func TestNormalizeUsageDerivesSingleMissingBucket(t *testing.T) {
+	cases := map[string]struct {
+		raw           string
+		wantRead      int64
+		wantWrite     int64
+		wantReasoning int64
+	}{
+		"I=10 uncached=3 read=5 write absent => write 2": {
+			raw:           `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"noCacheTokens":3,"cacheReadTokens":5},"outputTokenDetails":{"reasoningTokens":2}}`,
+			wantRead:      5,
+			wantWrite:     2,
+			wantReasoning: 2,
+		},
+		"I=10 read=5 write=2 uncached absent => uncached 3": {
+			raw:           `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"cacheReadTokens":5,"cacheWriteTokens":2},"outputTokenDetails":{"reasoningTokens":2}}`,
+			wantRead:      5,
+			wantWrite:     2,
+			wantReasoning: 2,
+		},
+		"reasoning absent text explicit => reasoning 2": {
+			raw:           `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"noCacheTokens":3,"cacheReadTokens":5,"cacheWriteTokens":2},"outputTokenDetails":{"textTokens":2}}`,
+			wantRead:      5,
+			wantWrite:     2,
+			wantReasoning: 2,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			usage := mustNormalize(t, tc.raw, nil)
+			if usage.CacheReadTokens != tc.wantRead || usage.CacheWriteTokens != tc.wantWrite ||
+				usage.ReasoningTokens != tc.wantReasoning || !usage.Complete {
+				t.Fatalf("usage = %+v", usage)
+			}
+			if usage.CacheReadTokens+usage.CacheWriteTokens > usage.InputTokens {
+				t.Fatalf("cache subsets exceed inclusive input: %+v", usage)
+			}
+		})
+	}
+}
+
 func TestNormalizeUsageFailClosed(t *testing.T) {
 	cases := map[string]struct {
 		raw        string
 		supplement *int64
 		code       string
 	}{
-		"missing cache write without supplement": {
-			raw:  `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"noCacheTokens":8,"cacheReadTokens":2},"outputTokenDetails":{"reasoningTokens":0}}`,
+		"ambiguous cache partition": {
+			raw:  `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"cacheReadTokens":5},"outputTokenDetails":{"reasoningTokens":0}}`,
 			code: CodeAccounting,
 		},
 		"missing reasoning": {
@@ -70,6 +112,14 @@ func TestNormalizeUsageFailClosed(t *testing.T) {
 		},
 		"reasoning over output": {
 			raw:  `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"noCacheTokens":8,"cacheReadTokens":2,"cacheWriteTokens":0},"outputTokenDetails":{"reasoningTokens":9}}`,
+			code: CodeUsageConflict,
+		},
+		"output partitions conflict": {
+			raw:  `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"noCacheTokens":8,"cacheReadTokens":2,"cacheWriteTokens":0},"outputTokenDetails":{"reasoningTokens":2,"textTokens":3}}`,
+			code: CodeUsageConflict,
+		},
+		"cache subsets exceed input": {
+			raw:  `{"inputTokens":10,"outputTokens":4,"inputTokenDetails":{"noCacheTokens":8,"cacheReadTokens":5,"cacheWriteTokens":5},"outputTokenDetails":{"reasoningTokens":0}}`,
 			code: CodeUsageConflict,
 		},
 		"negative": {
@@ -121,6 +171,29 @@ func TestUsageAddOverflow(t *testing.T) {
 	b := Usage{InputTokens: 10, OutputTokens: 0, TotalTokens: 10, Complete: true}
 	if _, err := a.Add(b); err == nil {
 		t.Fatalf("expected overflow error")
+	}
+}
+
+func TestUsageAddRejectsNegativeOperand(t *testing.T) {
+	// Opposing negatives must not be able to cancel into a plausible sum.
+	positive := Usage{InputTokens: 5, TotalTokens: 5, Complete: true}
+	negative := Usage{InputTokens: -5, TotalTokens: -5, Complete: true}
+	if _, err := positive.Add(negative); err == nil {
+		t.Fatalf("expected rejection of a negative operand")
+	}
+	if _, err := negative.Add(positive); err == nil {
+		t.Fatalf("expected rejection of a negative operand")
+	}
+}
+
+func TestUsageValidatedRejectsOversizedCache(t *testing.T) {
+	// cache read + cache write must stay within the inclusive input total; the
+	// old per-bucket check would have accepted this.
+	if (Usage{InputTokens: 10, CacheReadTokens: 6, CacheWriteTokens: 6, TotalTokens: 10}).validated() {
+		t.Fatalf("validated must reject cache read+write exceeding input")
+	}
+	if (Usage{InputTokens: 10, CacheReadTokens: 5, CacheWriteTokens: 5, TotalTokens: 10}).validated() == false {
+		t.Fatalf("cache read+write equal to input is valid")
 	}
 }
 

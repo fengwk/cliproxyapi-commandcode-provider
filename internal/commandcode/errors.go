@@ -17,6 +17,8 @@ const (
 	CodeResponseState       = "response_state"
 	CodeReasoningEffort     = "unsupported_reasoning_effort"
 	CodeContentNotDecodable = "content_not_decodable"
+	CodeTerminalUnknown     = "unknown_finish_reason"
+	CodeResponseTooLarge    = "response_too_large"
 )
 
 // invalidRequest reports a client payload that cannot be transformed losslessly.
@@ -68,4 +70,12 @@ func encodingError(message string) *Error {
 
 func responseStateError(message string) *Error {
 	return &Error{Code: CodeResponseState, Message: message, HTTPStatus: 500}
+}
+
+func terminalUnknownError() *Error {
+	return &Error{Code: CodeTerminalUnknown, Message: "upstream finish reason is not recognized", HTTPStatus: 502}
+}
+
+func responseTooLargeError() *Error {
+	return &Error{Code: CodeResponseTooLarge, Message: "response content exceeded the maximum size", HTTPStatus: 502}
 }

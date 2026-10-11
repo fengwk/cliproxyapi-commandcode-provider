@@ -41,8 +41,8 @@ func RequestHeaders(key, threadID string, zdr bool) (http.Header, *pluginapi.HTT
 	if !isValidUUID(threadID) {
 		return nil, nil, invalidRequest("threadId must be a canonical UUID")
 	}
-	if key == "" {
-		return nil, nil, invalidRequest("api key is required")
+	if !isSafeHeaderValue(key) {
+		return nil, nil, invalidRequest("api key contains invalid characters")
 	}
 
 	header := http.Header{}
@@ -84,4 +84,20 @@ func newTraceparent() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("00-%s-%s-01", hex.EncodeToString(buf[:16]), hex.EncodeToString(buf[16:])), nil
+}
+
+// isSafeHeaderValue rejects empty values and anything that could smuggle a
+// header or break out of the Authorization value (control characters, CR/LF
+// and whitespace).
+func isSafeHeaderValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c <= 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
