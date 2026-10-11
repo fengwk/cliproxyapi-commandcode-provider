@@ -1,0 +1,86 @@
+# Minimal CLIProxyAPI v8 configuration for the cliproxyapi-commandcode-provider
+# plugin. Copy to config.yaml next to the CLIProxyAPI binary and replace every
+# placeholder. Never commit real client keys, upstream CommandCode keys or
+# management secrets.
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+# Local management API. Remote access stays off and the bundled control panel is
+# disabled; the plugin UI is served from the management/resource routes instead.
+management:
+  allow-remote: false
+  secret-key: "replace-with-management-password"
+  disable-control-panel: true
+# Keys clients use against this proxy (not CommandCode upstream keys).
+access:
+  api-keys:
+    - "replace-with-client-api-key"
+# CPA owns credential storage. CommandCode keys imported through the plugin UI
+# are persisted under auth-dir by the host and are never written to this file or
+# the plugin YAML.
+oauth:
+  auth-dir: "./auths"
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "1h"
+  retry:
+    request-retry: 3
+    max-retry-credentials: 0
+    max-retry-interval: 30
+plugins:
+  enabled: true
+  dir: "./plugins"
+  # Add this source, then install CommandCode Provider from the CPA plugin store.
+  store-sources:
+    - "https://raw.githubusercontent.com/fengwk/cliproxyapi-commandcode-provider/main/registry.json"
+  configs:
+    cliproxyapi-commandcode-provider:
+      enabled: true
+      # Explicit transport mode, never automatic:
+      #   cli      (default) requests POST <base-url>/alpha/generate (NDJSON)
+      #   provider           requests POST <base-url>/provider/v1/*
+      # The mode is a single global choice per plugin instance; it is shown
+      # read-only in the management UI and cannot silently downgrade.
+      mode: cli
+      # API authority ONLY. Do NOT append /alpha or /provider/v1 (or /v1); the
+      # plugin adds the versioned path itself. Production must use https.
+      base-url: "https://api.commandcode.ai"
+      # Zero Data Retention is opt-in and matches the stock CLI default of false.
+      # true sends x-cmd-zdr: 1; a 422 cmd_zdr_no_providers is surfaced as-is and
+      # is never retried without ZDR.
+      zdr: false
+      # Optional whitelist. Only these native catalogue ids stay exposed. It
+      # never creates a route outside the catalogue (CLI intersection by
+      # default, or the live provider /provider/v1/models catalogue).
+      # models:
+      #   - "deepseek/deepseek-v4.1-flash"
+      # Explicit extra/override model metadata. Provider mode requires each entry
+      # to declare a supported endpoint protocol; known families may omit it.
+      # At most 100 entries, each id at most 200 bytes.
+      # manual-models:
+      #   - id: "deepseek/deepseek-v4.1-flash"
+      #     protocol: "openai"
+      #     context-window: 1000000
+      #     max-output-tokens: 64000
+      #     input-modalities: ["text"]
+      #     reasoning-efforts: ["low", "medium", "high"]
+
+# Native library location (see `make build` and the release archives):
+#   <plugins.dir>/<goos>/<goarch>/cliproxyapi-commandcode-provider.so
+# Install the library as cliproxyapi-commandcode-provider.so / .dylib / .dll.
+#
+# Key import UI and management endpoints exposed by the plugin (management key
+# required unless noted):
+#   GET  /v0/resource/plugins/cliproxyapi-commandcode-provider/ui        (public)
+#   POST /v0/management/plugins/cliproxyapi-commandcode-provider/keys
+#   GET  /v0/management/plugins/cliproxyapi-commandcode-provider/keys
+#   GET  /v0/management/plugins/cliproxyapi-commandcode-provider/settings
+#   POST /v0/management/plugins/cliproxyapi-commandcode-provider/validate
+#
+# Read-only CommandCode quota is available from the plugin UI and the native
+# quota route (management key required):
+#   POST /v0/management/plugins/cliproxyapi-commandcode-provider/quota
+# Body: {"auth_index":"<index from the plugin keys list>"}
+# The standard v8 management panel also registers its own quota page path.

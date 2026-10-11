@@ -1,0 +1,36 @@
+name: real-host
+
+# Reusable real-host integration suite. The caller passes a concrete CLIProxyAPI
+# release tag; the host binary is built from the module cache source (never
+# modified) and the plugin is built from this checkout. The plugin keeps its
+# pinned SDK version; only the host binary under test changes.
+on:
+  workflow_call:
+    inputs:
+      cpa-tag:
+        description: "CLIProxyAPI release tag to build and test against, e.g. v8.0.23"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  real-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build CLIProxyAPI host from source
+        run: bash scripts/build-cpa-host.sh "${{ inputs.cpa-tag }}" "$RUNNER_TEMP/cpa/cli-proxy-api"
+
+      - name: Run real-host integration suite
+        env:
+          CPA_BINARY: ${{ runner.temp }}/cpa/cli-proxy-api
+        run: make integration
