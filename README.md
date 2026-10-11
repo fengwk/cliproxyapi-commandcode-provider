@@ -3,7 +3,7 @@
 `cliproxyapi-commandcode-provider` 是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）v8 的**原生插件**（C ABI `c-shared` 动态库），把 CommandCode 作为 CPA 的上游 provider 接入。展示名 **CommandCode Provider**，稳定技术 ID `cliproxyapi-commandcode-provider`，provider / 公开模型前缀统一为 `commandcode` / `commandcode/`。
 
 - 客户端协议：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses，均支持流式与非流式。
-- 两种显式传输模式：`cli`（默认）与 `provider`；**不做自动降级或自动切换**。
+- 每个凭据显式选择 `cli` 或 `provider`；YAML `mode` 只是缺省默认（`cli`），**不检测套餐、不因 403 或其他错误自动降级或切换**。
 - 只读配额查询（CPA 原生 `QuotaProvider`），不轮询、不写回上游。
 - 本仓库是独立插件仓库，不 fork、不修改 CPA 核心，只使用 CPA v8.0.23 的公开 SDK。
 
@@ -69,21 +69,31 @@ plugins:
   configs:
     cliproxyapi-commandcode-provider:
       enabled: true
-      mode: cli                 # cli（默认）| provider，显式且全局
+      mode: cli                 # 仅缺省默认：cli | provider；不覆盖已有 per-auth mode
       base-url: "https://api.commandcode.ai"   # 仅 authority，不含 /alpha 或 /provider/v1
       zdr: false                # Zero Data Retention 默认关闭（opt-in）
       # models: [...]           # 可选白名单，不创造目录外路由
       # manual-models: [...]    # 显式新增/覆盖模型 metadata
 ```
 
-- **`mode`**：`cli` 走 `/alpha/generate`；`provider` 走 `/provider/v1/*`。模式是每个插件实例的**单一全局选择**，只在管理页只读展示；无效配置保留旧快照，不产生半切换。
+- **`mode`**：只作为**旧凭据默认模式**。没有根级 `mode` 的旧 auth，以及导入请求未传 `mode` 时，使用该值（缺省 `cli`）。已写入 auth 的显式 `mode` 不受它改变；改这个 YAML **不会**把所有凭据切到同一模式。`cli` 走 `/alpha/generate`；`provider` 走 `/provider/v1/*`。非法 YAML 保留旧配置快照，不产生半切换。
 - **`base-url`** 只写 API authority，可选带一个**路径前缀**（例如反向代理下的 `/commandcode`）；**不要**附加 `/v1`、`/alpha` 或 `/provider/v1`，插件在 authority+前缀之后自行拼接版本化路径。生产必须使用 HTTPS；禁止 URL 中含 userinfo/query/fragment。
 - **`zdr`** 默认 `false`（与原 CLI 一致）；`true` 时发送 `x-cmd-zdr: 1`，遇到 `422 cmd_zdr_no_providers` 原样上报，**不会撤掉 ZDR 再重试**。
 - **`models`** 只是白名单，不新增目录外模型。
-- **`manual-models`** 用于显式注册/覆盖模型：`{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}`，provider 模式必须声明受支持 endpoint（`openai`/`claude`/`openai-response`），上限 100 条、每条 id ≤ 200 字节。
+- **`manual-models`** 是两种模式共享的模型元数据：`{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}`，`protocol` 为 `openai` / `claude` / `openai-response`。结构校验与默认模式无关。能否发布或执行取决于**当前凭据模式**：Provider 需要手动 `protocol` 或当前目录里可证明的 chat endpoint；CLI 拒绝显式声明了 text/image 以外输入的条目。上限 100 条、每条 id ≤ 200 字节。
 - **宿主保留字段**：`enabled`、`priority` 和商店写入的 `store` 由 CPA 管理；插件接受但不把它们作为业务配置。`store` 内的版本、安装来源及其他元数据不影响传输模式或上游地址；其他未知顶层字段仍严格拒绝。
 
-模式是**显式**的：插件不会因为 `403 upgrade_required` 或任何错误自动在 `cli` 与 `provider` 之间切换，也不会自动回退到某个固定模型列表。
+模式是**每凭据显式**的：插件不检测套餐，不会因为 `403 upgrade_required` 或任何错误在 `cli` 与 `provider` 之间降级或切换，也不会自动回退到某个固定模型列表。
+
+### 凭据 JSON
+
+宿主保存在 `auth-dir` 的物理记录带根级 `mode`。示例（占位 key，不是真实凭据）：
+
+```json
+{"type":"commandcode","api_key":"replace-with-commandcode-key","mode":"cli"}
+```
+
+`mode` 只能是 `cli` 或 `provider`。旧记录可以不写该字段，执行时采用 YAML 默认值；一旦写上显式值，改 YAML 默认值不会改变它。空值、类型错误或非法值失败关闭，不改用其他来源。不要把 key 放进本仓库或 YAML。
 
 ### 商店安装后显示“未注册”
 
@@ -96,9 +106,12 @@ v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.re
 密钥经插件管理路由导入，由宿主保存到 CPA `auth-dir`（默认 `0600`），**不写入 YAML、日志、URL 或浏览器存储**。
 
 - 管理界面（同源嵌入）：`GET /v0/resource/plugins/cliproxyapi-commandcode-provider/ui`
-- 列表 / 导入：`GET|POST /v0/management/plugins/cliproxyapi-commandcode-provider/keys`，导入体 `{"keys":[...],"label":"..."}`，返回 `{imported,skipped,failed}`；重复导入按 `skipped` 处理。
+- 列表：`GET .../keys` → `{files:[{name,auth_index,label,status,disabled,unavailable,success,failed,mode,mode_source,mode_error}]}`。`mode_source` 为 `auth`（记录内显式）或 `default`（采用 YAML 默认）。无法确定时 `mode=""`、`mode_source=""`、`mode_error=true`，不伪装成 `cli`；单条失败不阻断其他条目，响应不含 raw JSON、key 或路径。
+- 导入：`POST .../keys`，体 `{"keys":[...],"label":"...","mode":"cli"|"provider"}`。`mode` 可省略，省略时用 YAML 默认；UI 导入下拉默认选 CLI，并显式提交所选值，只作用于本次导入。非法、空或未知字段在零写入前拒绝。新凭据持久化该 `mode`。重复 key 仍 `skipped`，不改既有凭据模式。返回 `{imported,skipped,failed}`。
+- 修改模式：`PATCH .../keys`，体只能是 `{"auth_index":"...","mode":"cli"|"provider"}`（≤64KiB，无尾随 JSON）。`mode` 必须显式。只改该凭据的根级 `mode`，保留 `api_key`、`disabled`、`label`、`prefix`、`proxy_url`、`weight` 以及未知字段和精确 JSON 数字。只接受本 provider 的安全 flat `.json`；未知或外来 auth 为 404，读取或保存失败为 502，错误文案固定且不回显凭据。成功 `200`：`{auth_index, mode, mode_source:"auth"}`。
+- UI 每行有模式下拉和“保存模式”。保存后重新 GET，确认该条 `mode` 为目标且 `mode_source=auth`；未确认不等于已生效。非法或不可读显示错误，不伪装成 CLI。错误不清空列表或其他凭据。设置区的“旧凭据默认模式”只展示 YAML 默认，不是所有凭据的模式。
 - 删除：使用 **CPA 原生**认证文件管理路由 `DELETE /v8/management/credentials?name=<file>`；插件**没有** `host.auth.delete`。
-- Settings（只读）：`GET /v0/management/plugins/cliproxyapi-commandcode-provider/settings`（`mode`、`base_url`、`zdr`、`cli_version`、`catalog`、`manual-models`）。
+- Settings（只读）：`GET .../settings`。`mode` 与 `default_mode` 都是旧凭据默认值；另有 `mode_scope:"auth"`、`catalog`（该默认值下的目录状态）、`catalogs.cli` / `catalogs.provider`，以及 `base_url`、`zdr`、`cli_version`、`manual-models`。
 
 同账号的多把 key **额度不能相加**；账号耗尽时换同账号 key 也不会恢复额度。请只导入你有权使用的凭据。
 
@@ -127,11 +140,15 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ## 模型路由
 
-- **CLI 模式**：默认暴露嵌入的 CLI/public 交集（87 个）；上游 wire 不因客户端协议改变，均经 `/alpha/generate` NDJSON。CLI-only/别名条目需要显式 `manual-models` 注册。
-- **Provider 模式**：以实时 `GET <base-url>/provider/v1/models` 的 `supported_endpoints` 为路由依据。
+CPA 仍按模型选凭据；插件不自建选 key 调度。`model.for_auth` 与执行使用同一套严格解析：最新 AuthMetadata > AuthAttributes > StorageJSON > YAML 默认。字段缺失才看下一来源；显式存在但类型错误、空值或非法则失败，不降级。执行前把所选模式绑定到**当前请求**的配置副本；异步执行和续跑沿用该快照，不改共享配置。
+
+- **CLI 凭据**：发布嵌入的 CLI/public 交集（默认 87 个，白名单与合格手动模型会改变数量）；上游 wire 不因客户端协议改变，均经 `/alpha/generate` NDJSON。CLI-only/别名条目需要显式 `manual-models` 注册。显式声明 text/image 以外输入的手动条目不发布、不执行。
+- **Provider 凭据**：即使 YAML 默认是 `cli`，也会触发匿名 `GET <base-url>/provider/v1/models`（不携带凭据），并以当前目录的 `supported_endpoints` 路由：
   1. 模型声明了客户端原协议 → 直接用同协议 endpoint。
   2. 否则选择目录声明支持、且公共 SDK 已注册双向转换的确定性 endpoint。
   3. 无可用映射 → 本地 `400`，绝不把请求发到错误 endpoint 再“试另一种模式”。
+  手动条目若没有 `protocol`，也没有当前目录可证明的 chat endpoint，则不发布、不执行。
+- 插件默认模式的 `model.static` 只作兼容展示，不参与凭据模式判定，也不扩大该凭据的模型集。
 - 目录发现失败保留 last-good 并标记 stale，**不回退为空目录或 CLI**；发现失败不伪装成成功。
 
 ## 只读配额
@@ -163,7 +180,7 @@ Provider 模式原协议直通保留上游原生字段，例如 OpenAI Chat 原�
 
 ## 已知限制
 
-- **Go 套餐没有 Provider API 权限**：官方文档明确 Go 套餐调用会返回 `403 upgrade_required`。插件不会因此自动切换到 `cli` 模式，也不会把 Go 套餐描述成可调用 Provider API。
+- **Go 套餐没有 Provider API 权限**：官方文档明确 Go 套餐调用会返回 `403 upgrade_required`。插件不检测套餐，也不会因此把该凭据降到 `cli`，或把 Go 套餐描述成可调用 Provider API。需要 CLI 传输时，为该凭据显式选择 `cli`。
 - **原生 ABI 限制**（CPA v8.0.23，零核心修改）：
   1. `pluginabi.Error` 没有 Retry-After / 错误响应头，宿主 `rpcError` 只保留 Code/message/statusCode，**上游 429 的精确等待时间无法无损传到 CPA**。
   2. RPC 解码不保留 `Retryable`，冷却/故障转移由宿主按自身策略决定。
@@ -205,6 +222,7 @@ make integration  # 真实宿主测试，必须设置 CPA_BINARY=/abs/path/cli-p
 
 - `make integration` 使用 `-tags=integration`，**要求** `CPA_BINARY` 指向真实 CPA v8 宿主二进制；缺失时**硬失败**（退出码 2），绝不静默跳过。
 - 集成矩阵：2 模式（`cli`/`provider`）× 3 客户端协议 × 3 模型家族 × 流式/非流式 = **36 cell**，并额外覆盖 header 顺序（raw TCP 抓包，不用 `httptest` 的 header map 当顺序证据）、usage/工具/reasoning、亲和与 429/402 故障转移、unsupported 语义零上游调用、ZDR 422 不降级、key 导入/重启/删除/quota、UTF-8/EOF/错误/取消/关停。
+- 每凭据混合模式的集成计划覆盖：不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改、重启后旧记录仍用默认值且显式 mode 不变、非法模式不发上游。这些用例即将完成，本文不把它们计为已通过。
 - CI（`.github/workflows/ci.yml`）：`go vet` / `go test` / `go test -race` / Node UI 测试 / 三平台原生构建 / 真实宿主集成（`v8.0.23`，通过可复用 `real-host.yml`）。
 - 发布**仅人工**：`.github/workflows/release.yml` 由人工 `vX.Y.Z` tag 或手动 `workflow_dispatch` 触发；仓库内**没有** auto-release、自动 push、自动合并或定时改代码的工作流。发布前对准确 tag 执行 test/race/static/真实宿主集成门禁，再原生构建三平台；核验 ZIP 内容、动态库架构、metadata 版本/SDK/提交及 SHA256 后，先建草稿、上传全部资产才正式发布，并使用 `gh release create --verify-tag`（从不创建 tag）。
 
