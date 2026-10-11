@@ -20,7 +20,7 @@ const PluginName = "CommandCode Provider"
 
 // Version is the plugin release version. It can be overridden at build time via
 // -ldflags "-X github.com/fengwk/cliproxyapi-commandcode-provider/internal/provider.Version=...".
-var Version = "0.1.0"
+var Version = "0.1.1"
 
 // GitHubRepository satisfies the host registration metadata requirement.
 const GitHubRepository = "https://github.com/fengwk/cliproxyapi-commandcode-provider"

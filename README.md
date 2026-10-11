@@ -53,10 +53,10 @@ plugins:
 
 ```bash
 make build        # 产物 dist/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib}
-make package VERSION=0.1.0   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
+make package VERSION=0.1.1   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
 ```
 
-`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.1.0` 时归档为 `cliproxyapi-commandcode-provider_0.1.0_<goos>_<goarch>.zip`；不传则本地构建使用 `0.1.0-dev+<short-sha>`。发布由 tag 决定版本。
+`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.1.1` 时归档为 `cliproxyapi-commandcode-provider_0.1.1_<goos>_<goarch>.zip`；不传则本地构建使用 `0.1.1-dev+<short-sha>`。发布由 tag 决定版本。
 
 把动态库放到 `<plugins.dir>/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib,dll}`。注意 Linux 产物依赖 glibc，**不适用于 musl/Alpine**。
 
@@ -89,7 +89,7 @@ plugins:
 
 v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.register` / `plugin.reconfigure` 返回 `invalid config yaml`；全局和实例开关开启也无法解决。这同时会导致插件名称、可视化配置字段和管理菜单缺失。
 
-修复版本发布前的临时办法：先备份 CPA 配置，仅移除 `plugins.configs.cliproxyapi-commandcode-provider.store` 元数据块，保留该插件的其他配置与 `enabled: true`，保存后等待 CPA 配置重载并刷新插件列表。移除元数据会影响商店来源和版本追踪，之后应通过商店安装修复版本，让 CPA 重建对应新版本的 `store`；不要原样恢复旧版本元数据，也不要删除凭据或其他插件配置。反复安装同一个 v0.1.0 会再次写入该字段，不能解决问题。
+**v0.1.1 已修复**：刷新插件商店，升级或重新安装 v0.1.1。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装 v0.1.1，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
 
 ## 导入 CommandCode 密钥
 

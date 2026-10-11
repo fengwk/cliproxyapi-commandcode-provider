@@ -29,9 +29,10 @@ import (
 
 // Fixed test identities. Every credential here is synthetic and safe to log.
 const (
-	providerID = "commandcode"
-	pluginID   = "cliproxyapi-commandcode-provider"
-	pluginName = "CommandCode Provider"
+	providerID    = "commandcode"
+	pluginID      = "cliproxyapi-commandcode-provider"
+	pluginName    = "CommandCode Provider"
+	pluginVersion = "0.1.1"
 
 	clientKey = "fake-client-key"
 	mgmtKey   = "fake-management-password"
@@ -327,7 +328,7 @@ func installPlugin(pluginsDir string) error {
 	name := pluginLibName()
 	src := filepath.Join(pluginBuildRoot, runtime.GOOS, runtime.GOARCH, name)
 	extension := filepath.Ext(name)
-	installedName := strings.TrimSuffix(name, extension) + "-v0.1.0" + extension
+	installedName := strings.TrimSuffix(name, extension) + "-v" + pluginVersion + extension
 	dst := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, installedName)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("create plugin dir: %w", err)
@@ -379,14 +380,14 @@ plugins:
       store:
         id: cliproxyapi-commandcode-provider
         name: CommandCode Provider
-        version: 0.1.0
-        release-tag: v0.1.0
+        version: %q
+        release-tag: %q
         repository: https://github.com/fengwk/cliproxyapi-commandcode-provider
         source-id: synthetic-store
         source-url: http://127.0.0.1/registry.json
         install:
           type: github-release
-`, port, mgmtKey, clientKey, authDir, pluginsDir, pluginID, mode, upstreamAuthority, zdr))
+`, port, mgmtKey, clientKey, authDir, pluginsDir, pluginID, mode, upstreamAuthority, zdr, pluginVersion, "v"+pluginVersion))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA

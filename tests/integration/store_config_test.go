@@ -28,6 +28,9 @@ func TestStoreConfigRegistersAndReconfigures(t *testing.T) {
 			Enabled          bool              `json:"enabled"`
 			EffectiveEnabled bool              `json:"effective_enabled"`
 			ConfigFields     []json.RawMessage `json:"config_fields"`
+			Metadata         struct {
+				Version string `json:"version"`
+			} `json:"metadata"`
 		} `json:"plugins"`
 	}
 	if err := json.Unmarshal(body, &list); err != nil {
@@ -42,7 +45,7 @@ func TestStoreConfigRegistersAndReconfigures(t *testing.T) {
 		if !list.PluginsEnabled || !entry.Configured || !entry.Registered || !entry.Enabled || !entry.EffectiveEnabled {
 			t.Fatalf("store-installed plugin must register and take effect: %+v\n%s", entry, h.stdout.String())
 		}
-		if !strings.Contains(entry.Path, pluginID+"-v0.1.0.") || len(entry.ConfigFields) == 0 {
+		if !strings.Contains(entry.Path, pluginID+"-v"+pluginVersion+".") || len(entry.ConfigFields) == 0 || entry.Metadata.Version != pluginVersion {
 			t.Fatalf("versioned plugin must expose config fields: %+v", entry)
 		}
 	}
@@ -60,7 +63,7 @@ func TestStoreConfigRegistersAndReconfigures(t *testing.T) {
 		t.Fatalf("decode plugin config: %v", err)
 	}
 	store, ok := config["store"].(map[string]any)
-	if !ok || store["version"] != "0.1.0" {
+	if !ok || store["version"] != pluginVersion {
 		t.Fatalf("host must preserve store metadata: %+v", config)
 	}
 	config["zdr"] = true
