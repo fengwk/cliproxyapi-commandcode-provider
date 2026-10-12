@@ -4,7 +4,7 @@
     {
       "id": "cliproxyapi-commandcode-provider",
       "name": "CommandCode Provider",
-      "description": "CommandCode CLI/provider transport for CLIProxyAPI with session isolation and read-only quota.",
+      "description": "CommandCode per-credential CLI/provider transport for CLIProxyAPI with session isolation and read-only quota.",
       "author": "fengwk",
       "repository": "https://github.com/fengwk/cliproxyapi-commandcode-provider",
       "license": "MIT",

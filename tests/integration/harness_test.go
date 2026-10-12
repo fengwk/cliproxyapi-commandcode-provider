@@ -32,7 +32,7 @@ const (
 	providerID    = "commandcode"
 	pluginID      = "cliproxyapi-commandcode-provider"
 	pluginName    = "CommandCode Provider"
-	pluginVersion = "0.1.1"
+	pluginVersion = "0.2.0"
 
 	clientKey = "fake-client-key"
 	mgmtKey   = "fake-management-password"
@@ -40,7 +40,7 @@ const (
 	keyBeta   = "fake-key-beta"
 	keyGamma  = "fake-key-gamma"
 
-	// Transport modes. The plugin instance mode is global and explicit.
+	// Explicit per-auth transports; the plugin value is only a legacy default.
 	modeCLI      = "cli"
 	modeProvider = "provider"
 
