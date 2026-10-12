@@ -108,6 +108,23 @@ func TestValidateBaseURLRejectsUnsafe(t *testing.T) {
 	}
 }
 
+// TestValidateBaseURLRejectsForceQuery proves a trailing query delimiter (a bare
+// "?") is rejected so a later path join cannot push the endpoint into the query.
+// Ordinary URLs and path prefixes keep working.
+func TestValidateBaseURLRejectsForceQuery(t *testing.T) {
+	for _, raw := range []string{"https://example.invalid?", "https://example.invalid/v1?"} {
+		if _, err := validateBaseURL(raw); err == nil {
+			t.Fatalf("a trailing query delimiter must be rejected: %q", raw)
+		}
+	}
+	if got, err := validateBaseURL("https://example.invalid"); err != nil || got != "https://example.invalid" {
+		t.Fatalf("a plain base URL must still pass: %q %v", got, err)
+	}
+	if got, err := validateBaseURL("https://example.invalid/v1"); err != nil || got != "https://example.invalid/v1" {
+		t.Fatalf("a path prefix must still pass: %q %v", got, err)
+	}
+}
+
 func TestParseConfigRejectsUnknownAndSecondDocument(t *testing.T) {
 	// A misspelled mode must fail closed instead of silently defaulting.
 	if _, err := parseConfig([]byte("mdoe: provider")); err == nil {

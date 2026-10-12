@@ -359,6 +359,9 @@ Provider 与 CLI 使用同一 API key（官方文档），但同 key 不等于�
 
 成功响应保留合法 upstream usage、rate-limit、retry-after、request-id；失败响应的 Retry-After 无法通过当前原生 ABI 进入 CPA 的重试计时（见第 13 节）。清除 hop-by-hop 与敏感响应头，不全量转发 cookies。reasoning 文本/签名能力以原协议和模型 metadata 为准。
 
+- 跨协议把 Responses 上游转换为 Chat/Claude 前先判定终态：显式 `status` 只有 `completed`/`incomplete` 放行，`failed`/`cancelled`/其它非终态一律返回固定脱敏 502；缺失（或非字符串）`status` 的历史样本兼容放行。不把上游错误文本或 body 回显，也不把未知状态默认成 `response.completed`；原生同协议 Responses 的 200 body 原样透传。
+- Provider SSE 组帧接受 LF/CRLF/单 CR 行结束并剥离流首单个 UTF-8 BOM；EOF 时先校验残余半帧（截断即 502），只有帧完整且已由非空字符串 `finish_reason`（或等价原生终态）证明完成时，才允许无 `[DONE]` 成功并为转换器补发终态。生命周期 quiesce/shutdown 中断未完成流时，首次 close 必须携带固定的中断错误。
+
 官方 `/systemone` 是 typesafe/jev 的概率决策接口，不是 Chat/Responses：v1 排除，不误注册为可聊天模型。
 
 ## 10. 模型发现、能力与版本维护

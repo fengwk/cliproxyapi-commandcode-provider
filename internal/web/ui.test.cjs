@@ -764,6 +764,10 @@ async function mountUi(options) {
       return { status: resp.status, ok: resp.status >= 200 && resp.status < 300, text: async () => JSON.stringify(resp.body), json: async () => resp.body };
     }
     // Default GET keys
+    if (typeof opts.keysTextProvider === "function") {
+      const text = opts.keysTextProvider();
+      return { status: 200, ok: true, text: async () => text, json: async () => JSON.parse(text) };
+    }
     const files = typeof opts.filesProvider === "function" ? opts.filesProvider() : (opts.files || []);
     return { status: 200, ok: true, text: async () => JSON.stringify({ files }), json: async () => ({ files }) };
   };
@@ -1516,6 +1520,83 @@ test("save mode preserves existing rows and selection on empty, missing, or vani
     assert.equal(get("status").className, "status error");
     // Existing rows preserved
     assert.equal(get("files-body").children.length, 1);
+  }
+});
+
+test("a broken 200 keys list is not reported as empty and preserves existing rows", async () => {
+  const badBodies = [
+    { name: "invalid-json", text: "NOT_JSON_BODY_200{" },
+    { name: "empty-object", text: "{}" },
+    { name: "error-body", text: '{"error":"failed"}' },
+    { name: "non-array-files", text: '{"files":false}' }
+  ];
+
+  for (const bad of badBodies) {
+    let calls = 0;
+    const { get, settle } = await mountUi({
+      keysTextProvider: () => {
+        calls += 1;
+        // The first load is a valid list; the reload returns the broken body.
+        return calls === 1
+          ? JSON.stringify({ files: [{ name: "key-1.json", auth_index: "auth-1" }] })
+          : bad.text;
+      }
+    });
+
+    assert.equal(get("files-body").children.length, 1, bad.name + ": initial row rendered");
+    assert.equal(get("status").className, "status ok", bad.name + ": initial load ok");
+
+    get("reload-btn").handlers.click({});
+    await settle();
+
+    assert.equal(get("files-body").children.length, 1, bad.name + ": existing row preserved");
+    assert.equal(get("status").className, "status error", bad.name + ": failure surfaces an error");
+    assert.doesNotMatch(get("status").textContent, /暂无已托管的密钥/, bad.name + ": must not claim an empty directory");
+    assert.doesNotMatch(get("status").textContent, /共 0 条/, bad.name + ": must not claim zero total");
+  }
+});
+
+test("a legal empty files list remains an empty-list success", async () => {
+  const { get, settle } = await mountUi({
+    keysTextProvider: () => JSON.stringify({ files: [] })
+  });
+  assert.equal(get("status").className, "status ok");
+  assert.match(get("status").textContent, /列表为空/);
+  await settle();
+});
+
+test("a falsy 200 keys body (null/false/0) surfaces an error instead of stalling or rendering empty", async () => {
+  // A valid JSON body that is not a key directory must be treated exactly like
+  // any other malformed 200 body; the old `if (!payload) return` guard let
+  // null/false/0 through and left the UI stuck on the loading status.
+  for (const body of ["null", "false", "0"]) {
+    // Initial request: the very first GET returns the falsy body.
+    {
+      const { get } = await mountUi({ keysTextProvider: () => body });
+      assert.equal(get("status").className, "status error", body + ": initial falsy body must surface an error");
+      assert.doesNotMatch(get("status").textContent, /正在加载/, body + ": must not stall on the loading status");
+      assert.doesNotMatch(get("status").textContent, /暂无已托管的密钥/, body + ": must not claim an empty directory");
+      assert.equal(get("files-body").children.length, 0, body + ": must not render an empty placeholder row");
+    }
+    // Refresh control: a valid list first, then the reload returns the falsy body.
+    {
+      let calls = 0;
+      const { get, settle } = await mountUi({
+        keysTextProvider: () => {
+          calls += 1;
+          return calls === 1 ? JSON.stringify({ files: [{ name: "key-1.json", auth_index: "auth-1" }] }) : body;
+        }
+      });
+      assert.equal(get("files-body").children.length, 1, body + ": initial valid row rendered");
+      assert.equal(get("status").className, "status ok", body + ": initial load ok");
+
+      get("reload-btn").handlers.click({});
+      await settle();
+
+      assert.equal(get("files-body").children.length, 1, body + ": existing row preserved on refresh");
+      assert.equal(get("status").className, "status error", body + ": refresh failure surfaces an error");
+      assert.doesNotMatch(get("status").textContent, /暂无已托管的密钥/, body + ": must not claim an empty directory");
+    }
   }
 });
 

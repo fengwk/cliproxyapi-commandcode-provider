@@ -1569,7 +1569,9 @@ function initUi() {
       try {
         return JSON.parse(text);
       } catch (err) {
-        return {};
+        // A non-empty but unparseable body is a protocol failure, not an empty
+        // result. Use a fixed local message so no raw syntax detail leaks.
+        throw new Error("响应格式无效");
       }
     });
   }
@@ -1637,13 +1639,27 @@ function initUi() {
           setStatus(describeHttpFailure(response.status), "error");
           return null;
         }
-        return readJson(response);
+        // A 200 body must be a plain object carrying a real files array. Any
+        // other JSON, including null/false/0, is a protocol failure: surface a
+        // fixed local error and preserve the rendered list instead of stalling on
+        // the loading status or claiming the key directory is empty.
+        return readJson(response)
+          .then(function (payload) {
+            if (!isPlainObject(payload) || !Array.isArray(payload.files)) {
+              throw new Error("密钥列表响应格式无效");
+            }
+            return payload;
+          })
+          .catch(function () {
+            setStatus("密钥列表响应格式无效，已保留当前列表。", "error");
+            return null;
+          });
       })
       .then(function (payload) {
         if (!payload) {
           return;
         }
-        var rows = normalizeFileEntries(isPlainObject(payload) ? payload.files : []);
+        var rows = normalizeFileEntries(payload.files);
         renderFiles(rows);
         setStatus(rows.length ? "已加载 " + rows.length + " 条密钥。" : "列表为空，暂无已托管的密钥。", "ok");
       })

@@ -476,7 +476,17 @@ func (m *Manager) runCLIPump(pump *cliPump, key uint64, downstreamID string, run
 		closed = true
 		m.bridge.StreamClose(downstreamID, message)
 	}
-	defer closeDown("")
+	interrupted := false
+	defer func() {
+		// pump.done alone does not prove the downstream received the terminal:
+		// pending frames may be unemitted or an emit may have failed. Only an
+		// uninterrupted, delivered terminal closes cleanly.
+		if interrupted || !pump.done {
+			closeDown(streamInterruptedMessage)
+			return
+		}
+		closeDown("")
+	}()
 	defer func() {
 		if recover() != nil {
 			closeDown("stream processing failed")
@@ -489,10 +499,15 @@ func (m *Manager) runCLIPump(pump *cliPump, key uint64, downstreamID string, run
 		}
 		select {
 		case <-run:
+			interrupted = true
 			return false
 		default:
 		}
-		return m.bridge.StreamEmit(downstreamID, frame) == nil
+		if m.bridge.StreamEmit(downstreamID, frame) != nil {
+			interrupted = true
+			return false
+		}
+		return true
 	}
 	for _, frame := range pending {
 		if !emit(frame) {

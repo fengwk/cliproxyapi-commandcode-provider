@@ -378,6 +378,31 @@ func enforceStream(body []byte, stream bool) []byte {
 	return updated
 }
 
+// codexResponseNotTerminal reports whether an ordinary Responses document
+// carries an explicit status that is neither a completed nor an incomplete
+// terminal. A missing or non-string status stays compatible with historical
+// samples, while failed/cancelled/queued/in_progress must never be wrapped as a
+// successful terminal.
+func codexResponseNotTerminal(native []byte) bool {
+	status := gjson.GetBytes(native, "status")
+	if !status.Exists() || status.Type != gjson.String {
+		return false
+	}
+	switch status.String() {
+	case "completed", "incomplete":
+		return false
+	default:
+		return true
+	}
+}
+
+// upstreamNotTerminal is the fixed, sanitized error for a cross-protocol
+// upstream that did not reach a successful terminal. It never echoes upstream
+// error text or the raw body.
+func upstreamNotTerminal() error {
+	return &ProviderError{Code: "upstream_not_terminal", Message: "upstream response did not complete", HTTPStatus: http.StatusBadGateway}
+}
+
 // wrapCodexTerminal wraps an ordinary Responses JSON body into the minimal
 // terminal event envelope expected by the SDK's Codex non-stream converters.
 func wrapCodexTerminal(native []byte) []byte {
@@ -447,6 +472,14 @@ func (m *Manager) executeProvider(p *plan, req rpcExecutorRequest) (pluginapi.Ex
 	}
 	converted := resp.Body
 	if p.sdk == translator.FormatCodex {
+		// An ordinary Responses document that reports a failed, cancelled or
+		// otherwise non-terminal status must fail closed: the SDK wrapper would
+		// otherwise default the unknown status to response.completed and forge a
+		// successful Chat/Claude answer. The error is fixed and sanitized so no
+		// upstream error text or body is echoed.
+		if codexResponseNotTerminal(resp.Body) {
+			return pluginapi.ExecutorResponse{}, upstreamNotTerminal()
+		}
 		converted = wrapCodexTerminal(resp.Body)
 	}
 	var param any
@@ -658,22 +691,40 @@ func (p *providerPump) translate(data []byte, sink func([]byte) bool) bool {
 	return true
 }
 
-// finishEOF resolves an upstream EOF. A proven terminal makes the end a clean
-// success; a chat source additionally needs an explicit [DONE] flush so the SDK
-// emits its terminal frame when the upstream omitted the sentinel. The flush is
-// only produced for a genuinely proven terminal, never to manufacture success.
+// finishEOF resolves an upstream EOF. Residual frames are validated first (a
+// truncated tail after finish_reason is never a clean success), then, only when
+// a proven terminal was seen and no real [DONE] already ended the stream, the
+// explicit [DONE] the SDK needs is flushed. Signals raised by the flush take
+// priority over its framing outcome, mirroring process.
 func (p *providerPump) finishEOF(sink func([]byte) bool) error {
 	if p.done {
 		return nil
 	}
-	if p.terminalSeen {
-		if p.plan.wire == translator.FormatOpenAI && p.plan.clientResp != translator.FormatOpenAI {
-			p.translate([]byte("[DONE]"), sink)
+	// A trailing lone-CR terminator may complete one final native event, which is
+	// classified exactly like a regular read.
+	finishErr := p.framer.finish(func(event sseEvent) bool { return p.handle(event, sink) })
+	if p.malformed {
+		return &ProviderError{Code: "upstream_stream_invalid", Message: "malformed upstream stream", HTTPStatus: http.StatusBadGateway}
+	}
+	if p.sawError {
+		return &ProviderError{Code: "upstream_stream_error", Message: "upstream stream error", HTTPStatus: http.StatusBadGateway}
+	}
+	if finishErr != nil {
+		if errors.Is(finishErr, errEmitStopped) {
+			return errEmitStopped
 		}
-		p.done = true
+		return &ProviderError{Code: "upstream_stream_invalid", Message: "malformed upstream stream", HTTPStatus: http.StatusBadGateway}
+	}
+	if p.done || !p.terminalSeen {
 		return nil
 	}
-	return p.framer.finish()
+	if p.plan.wire == translator.FormatOpenAI && p.plan.clientResp != translator.FormatOpenAI {
+		if !p.translate([]byte("[DONE]"), sink) {
+			return errEmitStopped
+		}
+	}
+	p.done = true
+	return nil
 }
 
 // preflightProvider reads until the first client frame, terminal signal or
@@ -730,7 +781,17 @@ func (m *Manager) runProviderPump(pump *providerPump, key uint64, upstreamID, do
 		closed = true
 		m.bridge.StreamClose(downstreamID, message)
 	}
-	defer closeDown("")
+	interrupted := false
+	defer func() {
+		// pump.done alone does not prove the downstream received the terminal:
+		// pending frames may be unemitted or an emit may have failed. Only an
+		// uninterrupted, delivered terminal closes cleanly.
+		if interrupted || !pump.done {
+			closeDown(streamInterruptedMessage)
+			return
+		}
+		closeDown("")
+	}()
 	defer func() {
 		if recover() != nil {
 			closeDown("stream processing failed")
@@ -743,10 +804,15 @@ func (m *Manager) runProviderPump(pump *providerPump, key uint64, upstreamID, do
 		}
 		select {
 		case <-run:
+			interrupted = true
 			return false
 		default:
 		}
-		return m.bridge.StreamEmit(downstreamID, frame) == nil
+		if m.bridge.StreamEmit(downstreamID, frame) != nil {
+			interrupted = true
+			return false
+		}
+		return true
 	}
 
 	for _, frame := range pending {
@@ -803,6 +869,9 @@ func (m *Manager) runProviderPump(pump *providerPump, key uint64, upstreamID, do
 		return
 	}
 	if errFinish := pump.finishEOF(emit); errFinish != nil {
+		if errors.Is(errFinish, errEmitStopped) {
+			return
+		}
 		closeDown("truncated upstream stream")
 		return
 	}
@@ -825,8 +894,9 @@ const (
 
 // classifyNativeEvent inspects one SSE data payload and reports whether it is a
 // native terminal signal, the chat sentinel or a native error. The second
-// result is true when the payload was not valid JSON at all, which is treated
-// as a malformed event so junk never flows downstream as success.
+// result is true when the payload is not a JSON object at all, which is treated
+// as a malformed event so junk (an array, null or scalar) never flows
+// downstream as success.
 func classifyNativeEvent(wire translator.Format, data []byte) (streamSignal, bool) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
@@ -838,7 +908,7 @@ func classifyNativeEvent(wire translator.Format, data []byte) (streamSignal, boo
 		}
 		return signalNone, false
 	}
-	if !json.Valid(trimmed) {
+	if !json.Valid(trimmed) || !gjson.ParseBytes(trimmed).IsObject() {
 		return signalError, true
 	}
 	switch wire {
@@ -867,7 +937,9 @@ func classifyNativeEvent(wire translator.Format, data []byte) (streamSignal, boo
 		if choices.IsArray() {
 			for _, choice := range choices.Array() {
 				reason := choice.Get("finish_reason")
-				if reason.Exists() && reason.Type != gjson.Null {
+				// Only a non-empty string proves a real terminal; an empty
+				// string, null, array or number must not manufacture success.
+				if reason.Type == gjson.String && strings.TrimSpace(reason.String()) != "" {
 					return signalTerminal, false
 				}
 			}

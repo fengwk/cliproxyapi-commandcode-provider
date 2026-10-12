@@ -11,6 +11,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
+// streamInterruptedMessage is the fixed, sanitized error reported to the
+// downstream when a lifecycle action (quiesce/shutdown) interrupts an unfinished
+// stream, or when a worker stops for a reason other than a proven terminal.
+const streamInterruptedMessage = "stream interrupted"
+
 // activeRequest tracks one in-flight host HTTP execution so quiesce/shutdown can
 // interrupt a blocked open or read and never leaves a goroutine or operation
 // behind.
@@ -205,7 +210,7 @@ func (m *Manager) interrupt(snapshots []activeSnapshot) {
 			m.bridge.HTTPStreamClose(op.upstreamStreamID)
 		}
 		if op.downstreamStream != "" {
-			m.bridge.StreamClose(op.downstreamStream, "")
+			m.bridge.StreamClose(op.downstreamStream, streamInterruptedMessage)
 		}
 	}
 }
