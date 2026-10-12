@@ -706,6 +706,509 @@ function normalizeManualModels(raw) {
   });
 }
 
+/* ----------------------------------------------- dependency-free CPA select */
+
+var SELECT_MARGIN = 8;
+var SELECT_OFFSET = 6;
+var SELECT_MAX_HEIGHT = 240;
+
+function selectClassList(node) {
+  var value = typeof node.className === "string" ? node.className : "";
+  var parts = value ? value.split(/\s+/).filter(Boolean) : [];
+  return {
+    contains: function (name) {
+      return parts.indexOf(name) >= 0;
+    },
+    add: function (name) {
+      if (parts.indexOf(name) < 0) {
+        parts.push(name);
+        node.className = parts.join(" ");
+      }
+    },
+    remove: function (name) {
+      var index = parts.indexOf(name);
+      if (index >= 0) {
+        parts.splice(index, 1);
+        node.className = parts.join(" ");
+      }
+    }
+  };
+}
+
+function selectEnabledOptions(select) {
+  var enabled = [];
+  var options = select.options || [];
+  for (var i = 0; i < options.length; i++) {
+    var group = options[i].parentNode;
+    if (!options[i].disabled && !(group && group.tagName === "OPTGROUP" && group.disabled)) {
+      enabled.push(options[i]);
+    }
+  }
+  return enabled;
+}
+
+function createSelectController(win, doc) {
+  var entries = [];
+  var serial = 0;
+  var active = null;
+  var menu = null;
+  var highlighted = -1;
+  var outsideBound = false;
+  var viewportBound = false;
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function viewportSize() {
+    var width = 0;
+    var height = 0;
+    if (win) {
+      width = win.innerWidth || 0;
+      height = win.innerHeight || 0;
+    }
+    if ((!width || !height) && doc.documentElement) {
+      width = width || doc.documentElement.clientWidth || 0;
+      height = height || doc.documentElement.clientHeight || 0;
+    }
+    var top = 0;
+    var left = 0;
+    var right = width;
+    var bottom = height;
+    try {
+      if (win.frameElement && win.parent && win.parent !== win) {
+        var rect = win.frameElement.getBoundingClientRect();
+        top = Math.max(0, -rect.top);
+        left = Math.max(0, -rect.left);
+        right = Math.min(width, win.parent.innerWidth - rect.left);
+        bottom = Math.min(height, win.parent.innerHeight - rect.top);
+      }
+    } catch (_) { /* Cross-origin hosts use the plugin viewport. */ }
+    return { top: top, left: left, right: right, bottom: bottom, height: height };
+  }
+
+  function entryFor(select) {
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].select === select) {
+        return entries[i];
+      }
+    }
+    return null;
+  }
+
+  function closeMenu(restoreFocus) {
+    if (outsideBound) {
+      doc.removeEventListener("mousedown", onOutsidePointer, true);
+      outsideBound = false;
+    }
+    if (viewportBound) {
+      win.removeEventListener("resize", onViewportChange);
+      win.removeEventListener("scroll", onViewportChange, true);
+      try {
+        if (win.parent && win.parent !== win) {
+          win.parent.removeEventListener("resize", onViewportChange);
+          win.parent.removeEventListener("scroll", onViewportChange, true);
+          win.parent.removeEventListener("mousedown", onOutsidePointer, true);
+        }
+      } catch (_) { /* Cross-origin parent events are unavailable. */ }
+      viewportBound = false;
+    }
+    if (menu && menu.parentNode) {
+      menu.parentNode.removeChild(menu);
+    }
+    menu = null;
+    highlighted = -1;
+    var current = active;
+    active = null;
+    if (current) {
+      syncEntry(current);
+      if (restoreFocus && current.trigger && typeof current.trigger.focus === "function") {
+        current.trigger.focus();
+      }
+    }
+  }
+
+  function positionMenu() {
+    if (!active || !menu || typeof active.trigger.getBoundingClientRect !== "function") {
+      return;
+    }
+    var rect = active.trigger.getBoundingClientRect();
+    var viewport = viewportSize();
+    var width = Math.min(rect.width, Math.max(0, viewport.right - viewport.left - SELECT_MARGIN * 2));
+    var left = clamp(rect.left, viewport.left + SELECT_MARGIN,
+      Math.max(viewport.left + SELECT_MARGIN, viewport.right - width - SELECT_MARGIN));
+    var below = viewport.bottom - rect.bottom - SELECT_MARGIN - SELECT_OFFSET;
+    var above = rect.top - viewport.top - SELECT_MARGIN - SELECT_OFFSET;
+    var downward = below >= SELECT_MAX_HEIGHT || below >= above;
+    var maxHeight = Math.max(0, Math.min(SELECT_MAX_HEIGHT, downward ? below : above));
+    menu.style.left = left + "px";
+    menu.style.width = width + "px";
+    menu.style.maxHeight = maxHeight + "px";
+    menu.style.top = downward ? rect.bottom + SELECT_OFFSET + "px" : "auto";
+    menu.style.bottom = downward ? "auto" : viewport.height - rect.top + SELECT_OFFSET + "px";
+  }
+
+  function paintHighlight() {
+    if (!menu) {
+      return;
+    }
+    var options = menu.querySelectorAll("[role='option']");
+    for (var i = 0; i < options.length; i++) {
+      var classes = selectClassList(options[i]);
+      if (i === highlighted) {
+        classes.add("is-highlighted");
+      } else {
+        classes.remove("is-highlighted");
+      }
+      if (i === highlighted) {
+        active.trigger.setAttribute("aria-activedescendant", options[i].id);
+      }
+    }
+    if (highlighted < 0) {
+      active.trigger.removeAttribute("aria-activedescendant");
+    } else if (options[highlighted]) {
+      var current = options[highlighted];
+      if (current.offsetTop < menu.scrollTop) menu.scrollTop = current.offsetTop;
+      else if (current.offsetTop + current.offsetHeight > menu.scrollTop + menu.clientHeight) {
+        menu.scrollTop = current.offsetTop + current.offsetHeight - menu.clientHeight;
+      }
+    }
+  }
+
+  function moveHighlight(step) {
+    var options = selectEnabledOptions(active.select);
+    if (!options.length) {
+      return;
+    }
+    if (highlighted < 0) {
+      highlighted = step > 0 ? 0 : options.length - 1;
+    } else {
+      highlighted = (highlighted + step + options.length) % options.length;
+    }
+    paintHighlight();
+  }
+
+  function commitIndex(index) {
+    if (!active || active.select.disabled) return;
+    var options = selectEnabledOptions(active.select);
+    var option = options[index];
+    if (!option) {
+      return;
+    }
+    var select = active.select;
+    var previous = select.value;
+    select.value = option.value;
+    closeMenu(true);
+    if (select.value !== previous && typeof select.dispatchEvent === "function") {
+      var change;
+      if (typeof win.Event === "function") {
+        change = new win.Event("change", { bubbles: true });
+      } else {
+        change = doc.createEvent("Event");
+        change.initEvent("change", true, true);
+      }
+      select.dispatchEvent(change);
+    }
+  }
+
+  function openMenu(entry) {
+    if (!entry || entry.select.disabled) {
+      return;
+    }
+    if (active) {
+      closeMenu(false);
+    }
+    active = entry;
+    highlighted = -1;
+    var enabled = selectEnabledOptions(entry.select);
+    for (var i = 0; i < enabled.length; i++) {
+      if (enabled[i].value === entry.select.value) {
+        highlighted = i;
+        break;
+      }
+    }
+    if (highlighted < 0 && enabled.length) {
+      highlighted = 0;
+    }
+    menu = doc.createElement("div");
+    menu.className = "cpa-select-menu";
+    if (menu.style && typeof menu.style === "object") {
+      menu.style.position = "fixed";
+    }
+    menu.id = entry.listId;
+    menu.setAttribute("role", "listbox");
+    var labelledBy = entry.trigger.getAttribute("aria-labelledby");
+    if (labelledBy) menu.setAttribute("aria-labelledby", labelledBy);
+    var label = entry.select.getAttribute("aria-label");
+    if (label) {
+      menu.setAttribute("aria-label", label);
+    }
+    for (var n = 0; n < enabled.length; n++) {
+      var option = doc.createElement("button");
+      option.type = "button";
+      option.tabIndex = -1;
+      option.className = "cpa-select-option";
+      option.id = entry.listId + "-option-" + n;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", enabled[n].value === entry.select.value ? "true" : "false");
+      option.textContent = enabled[n].textContent || enabled[n].label || enabled[n].value || "";
+      option.setAttribute("data-index", String(n));
+      option.addEventListener("mousedown", function (event) {
+        if (event.preventDefault) {
+          event.preventDefault();
+        }
+      });
+      option.addEventListener("mouseenter", function (event) {
+        var target = event.currentTarget || event.target;
+        highlighted = Number(target.getAttribute("data-index"));
+        paintHighlight();
+      });
+      option.addEventListener("click", function (event) {
+        var target = event.currentTarget || event.target;
+        commitIndex(Number(target.getAttribute("data-index")));
+      });
+      menu.appendChild(option);
+    }
+    doc.body.appendChild(menu);
+    positionMenu();
+    syncEntry(entry);
+    paintHighlight();
+    bindShared();
+  }
+
+  function onTriggerKey(event) {
+    var entry = entryFor(event.currentTarget && event.currentTarget.ccSelectSource);
+    if (!entry || entry.select.disabled) {
+      return;
+    }
+    var key = event.key;
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      event.preventDefault();
+      if (active !== entry) {
+        openMenu(entry);
+        return;
+      }
+      moveHighlight(key === "ArrowDown" ? 1 : -1);
+    } else if (key === "Home" || key === "End") {
+      if (active !== entry) {
+        return;
+      }
+      event.preventDefault();
+      var count = selectEnabledOptions(entry.select).length;
+      highlighted = key === "Home" ? 0 : Math.max(0, count - 1);
+      paintHighlight();
+    } else if (key === "Enter" || key === " ") {
+      event.preventDefault();
+      if (active !== entry) {
+        openMenu(entry);
+      } else if (highlighted >= 0) {
+        commitIndex(highlighted);
+      }
+    } else if (key === "Escape") {
+      if (active === entry) {
+        event.preventDefault();
+        closeMenu(true);
+      }
+    } else if (key === "Tab" && active === entry) {
+      closeMenu(false);
+    }
+  }
+
+  function onOutsidePointer(event) {
+    if (!active) {
+      return;
+    }
+    var target = event.target;
+    if (active.wrap && active.wrap.contains && active.wrap.contains(target)) {
+      return;
+    }
+    if (menu && menu.contains && menu.contains(target)) {
+      return;
+    }
+    closeMenu(false);
+  }
+
+  function onViewportChange() {
+    if (active) {
+      positionMenu();
+    }
+  }
+
+  function bindShared() {
+    if (!outsideBound) {
+      doc.addEventListener("mousedown", onOutsidePointer, true);
+      outsideBound = true;
+    }
+    if (!viewportBound && win) {
+      win.addEventListener("resize", onViewportChange);
+      win.addEventListener("scroll", onViewportChange, true);
+      try {
+        if (win.parent && win.parent !== win) {
+          win.parent.addEventListener("resize", onViewportChange);
+          win.parent.addEventListener("scroll", onViewportChange, true);
+          win.parent.addEventListener("mousedown", onOutsidePointer, true);
+        }
+      } catch (_) { /* Cross-origin parent events are unavailable. */ }
+      viewportBound = true;
+    }
+  }
+
+  function syncEntry(entry) {
+    if (!entry.trigger || !entry.text) {
+      return;
+    }
+    var selected = null;
+    var options = entry.select.options || [];
+    for (var i = 0; i < options.length; i++) {
+      if (options[i].value === entry.select.value) {
+        selected = options[i];
+        break;
+      }
+    }
+    var text = selected ? selected.textContent || selected.label || selected.value || "" : "";
+    entry.text.textContent = text;
+    var classes = selectClassList(entry.text);
+    if (selected) {
+      classes.remove("cpa-select-placeholder");
+    } else {
+      classes.add("cpa-select-placeholder");
+    }
+    entry.trigger.disabled = !!entry.select.disabled;
+    entry.trigger.title = text;
+    var described = entry.select.getAttribute("aria-describedby");
+    if (described) {
+      entry.trigger.setAttribute("aria-describedby", described);
+    } else {
+      entry.trigger.removeAttribute("aria-describedby");
+    }
+    var invalid = entry.select.getAttribute("aria-invalid");
+    if (invalid) {
+      entry.trigger.setAttribute("aria-invalid", invalid);
+    } else {
+      entry.trigger.removeAttribute("aria-invalid");
+    }
+    var expanded = active === entry;
+    entry.trigger.setAttribute("aria-expanded", expanded ? "true" : "false");
+    if (expanded) {
+      entry.trigger.setAttribute("aria-controls", entry.listId);
+    } else {
+      entry.trigger.removeAttribute("aria-controls");
+      entry.trigger.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function enhance(select) {
+    if (!select || select.ccSelectEntry) {
+      return select.ccSelectEntry || null;
+    }
+    var parent = select.parentNode;
+    if (!parent) {
+      return null;
+    }
+    if (!select.id) select.id = "cpa-select-" + (++serial);
+    var compact = selectClassList(select).contains("select-mode");
+    var wrap = doc.createElement("span");
+    wrap.className = compact ? "cpa-select cpa-select-sm" : "cpa-select cpa-select-full";
+    var trigger = doc.createElement("button");
+    trigger.type = "button";
+    trigger.id = select.id + "-trigger";
+    trigger.className = "btn cpa-select-trigger";
+    trigger.setAttribute("role", "combobox");
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    var fieldLabel = select.id && doc.querySelector ? doc.querySelector("label[for='" + select.id + "']") : null;
+    if (fieldLabel) {
+      if (!fieldLabel.id) {
+        fieldLabel.id = select.id + "-label";
+      }
+      trigger.setAttribute("aria-labelledby", fieldLabel.id);
+    }
+    var ownLabel = select.getAttribute("aria-label");
+    if (ownLabel) {
+      trigger.setAttribute("aria-label", ownLabel);
+    }
+    var labelledBy = select.getAttribute("aria-labelledby");
+    if (labelledBy) trigger.setAttribute("aria-labelledby", labelledBy);
+    var text = doc.createElement("span");
+    text.className = "cpa-select-text";
+    var chevron = doc.createElement("span");
+    chevron.className = "cpa-select-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    trigger.appendChild(text);
+    trigger.appendChild(chevron);
+    var entry = {
+      select: select,
+      wrap: wrap,
+      trigger: trigger,
+      text: text,
+      listId: select.id + "-listbox"
+    };
+    trigger.ccSelectSource = select;
+    select.ccSelectEntry = entry;
+    selectClassList(select).add("cpa-select-native");
+    select.setAttribute("aria-hidden", "true");
+    select.tabIndex = -1;
+    trigger.addEventListener("click", function () {
+      if (select.disabled) {
+        return;
+      }
+      if (active === entry) {
+        closeMenu(false);
+      } else {
+        openMenu(entry);
+      }
+    });
+    trigger.addEventListener("keydown", onTriggerKey);
+    select.addEventListener("change", function () {
+      syncEntry(entry);
+    });
+    select.addEventListener("focus", function () { trigger.focus(); });
+    parent.insertBefore(wrap, select);
+    wrap.appendChild(trigger);
+    wrap.appendChild(select);
+    syncEntry(entry);
+    entries.push(entry);
+    return entry;
+  }
+
+  function refresh() {
+    closeMenu(false);
+    var live = [];
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      if (!entry.select || !entry.select.isConnected) {
+        if (active === entry) {
+          closeMenu(false);
+        }
+        if (entry.wrap && entry.wrap.parentNode) {
+          entry.wrap.parentNode.removeChild(entry.wrap);
+        }
+        if (entry.select) {
+          entry.select.ccSelectEntry = null;
+          if (entry.select.parentNode === entry.wrap) entry.wrap.removeChild(entry.select);
+          selectClassList(entry.select).remove("cpa-select-native");
+          entry.select.removeAttribute("aria-hidden");
+        }
+        continue;
+      }
+      live.push(entry);
+      syncEntry(entry);
+    }
+    entries = live;
+    var selects = doc.querySelectorAll("select");
+    for (var s = 0; s < selects.length; s++) {
+      if (!selects[s].ccSelectEntry && selects[s].isConnected) {
+        enhance(selects[s]);
+      }
+    }
+    if (active && entries.indexOf(active) < 0) {
+      closeMenu(false);
+    }
+  }
+
+  return { refresh: refresh };
+}
+
 var api = {
   PLUGIN_ID: PLUGIN_ID,
   MAX_KEYS: MAX_KEYS,
@@ -738,7 +1241,8 @@ var api = {
   resolveAppliedTheme: resolveAppliedTheme,
   readParentTheme: readParentTheme,
   collectThemeTokens: collectThemeTokens,
-  normalizeManualModels: normalizeManualModels
+  normalizeManualModels: normalizeManualModels,
+  createSelectController: createSelectController
 };
 
 if (typeof module !== "undefined" && module.exports) {
@@ -789,6 +1293,7 @@ function initUi() {
   }
 
   var endpoints = deriveEndpoints(window.location);
+  var selects = createSelectController(window, doc);
   var secureContext = false;
   var busy = false;
   var manualDraft = [];
@@ -867,6 +1372,7 @@ function initUi() {
     for (var s = 0; s < modeSelects.length; s++) {
       modeSelects[s].disabled = disabled || !isSafeAuthIndex(modeSelects[s].getAttribute("data-auth-index"));
     }
+    selects.refresh();
   }
 
   function applySecurityGate() {
@@ -1052,6 +1558,7 @@ function initUi() {
       }
     }
     updateSummary(rows);
+    selects.refresh();
   }
 
   function readJson(response) {
@@ -1146,6 +1653,7 @@ function initUi() {
       .then(function () {
         managementKey = "";
         setBusy(false);
+        selects.refresh();
         if (!modelsDirty && currentKey()) {
           loadSettings();
         }
@@ -1230,6 +1738,7 @@ function initUi() {
         managementKey = "";
         payload.body = "";
         setBusy(false);
+        selects.refresh();
       });
   }
 
@@ -1339,6 +1848,7 @@ function initUi() {
         managementKey = "";
         patchPayload = "";
         setBusy(false);
+        selects.refresh();
       });
   }
 
@@ -1386,6 +1896,7 @@ function initUi() {
       .then(function () {
         managementKey = "";
         setBusy(false);
+        selects.refresh();
       });
   }
 
@@ -1498,6 +2009,7 @@ function initUi() {
         managementKey = "";
         payload.body = "";
         setBusy(false);
+        selects.refresh();
       });
   }
 
@@ -1527,6 +2039,7 @@ function initUi() {
         renderManualModels();
         if (modelStatus) modelStatus.textContent = "有未保存的模型草稿。";
         setBusy(false);
+        selects.refresh();
       });
       actions.appendChild(remove);
       row.appendChild(actions);
@@ -1575,6 +2088,7 @@ function initUi() {
       key = "";
       window.clearTimeout(timer);
       setBusy(false);
+      selects.refresh();
     }
   }
 
@@ -1636,6 +2150,7 @@ function initUi() {
       key = "";
       window.clearTimeout(timer);
       setBusy(false);
+      selects.refresh();
     }
   }
 
@@ -1649,6 +2164,7 @@ function initUi() {
         renderManualModels();
         if (modelStatus) modelStatus.textContent = "有未保存的模型草稿。";
         setBusy(false);
+        selects.refresh();
       } catch (err) {
         if (modelStatus) modelStatus.textContent = err.message;
       }
@@ -1664,6 +2180,7 @@ function initUi() {
     modelsDirty = false;
     renderManualModels();
     setBusy(busy);
+    selects.refresh();
   });
 
   el.authForm.addEventListener("submit", function (event) {
@@ -1681,6 +2198,7 @@ function initUi() {
   });
 
   applySecurityGate();
+  selects.refresh();
   if (secureContext) {
     setStatus("尚未加载。请输入 CPA 管理密钥并点击“连接并刷新”。", "info");
   }

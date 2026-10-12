@@ -515,12 +515,13 @@ test("all buttons use the shared .btn contract instead of type/table-specific st
   for (const declaration of [
     "display: inline-flex",
     "gap: 8px",
-    "padding: 10px 14px",
+    "min-height: 34px",
+    "padding: 6px 12px",
     "border: 1px solid transparent",
     "background-color: var(--bg-secondary)",
-    "font-size: 16px",
+    "font-size: 13px",
     "font-weight: 600",
-    "line-height: 1.5",
+    "line-height: 20px",
     "white-space: nowrap"
   ]) {
     assert.ok(base.includes(declaration), "`.btn` must declare " + declaration);
@@ -530,8 +531,10 @@ test("all buttons use the shared .btn contract instead of type/table-specific st
   assert.match(rule(".btn-secondary"), /background-color:\s*var\(--bg-tertiary\)/);
   assert.match(rule(".btn-ghost"), /background-color:\s*transparent/);
   assert.match(rule(".btn-danger"), /background-color:\s*var\(--error-color\)/);
-  assert.match(rule(".btn-sm"), /padding:\s*8px 10px/);
-  assert.match(rule(".btn-sm"), /font-size:\s*14px/);
+  assert.match(rule(".btn-sm"), /min-height:\s*28px/);
+  assert.match(rule(".btn-sm"), /padding:\s*3px 9px/);
+  assert.match(rule(".btn-sm"), /font-size:\s*12px/);
+  assert.match(rule(".btn-sm"), /line-height:\s*20px/);
   assert.match(rule(".btn:disabled"), /opacity:\s*0\.6/);
   assert.match(rule(".btn:focus-visible"), /outline:\s*2px solid var\(--text-primary\)/);
 
@@ -560,7 +563,7 @@ test("all buttons use the shared .btn contract instead of type/table-specific st
 /* ---------------------------------------------------------------- DOM Flows */
 
 function matchesSelector(element, selector) {
-  const spec = /^([a-zA-Z]+)?(?:\[([^\]=]+)(?:=['"]?([^'"\]]*)['"]?)?\])?$/.exec(selector.trim());
+  const spec = /^([a-zA-Z0-9_-]+|\*)?(?:\[([^\]=]+)(?:=['"]?([^'"\]]*)['"]?)?\])?$/.exec(selector.trim());
   if (!spec) return false;
   const tag = spec[1];
   const attr = spec[2];
@@ -576,22 +579,60 @@ function matchesSelector(element, selector) {
 function createMockDom() {
   const registry = new Map();
 
+  let serial = 0;
   function makeElement(tag) {
     const el = {
+      serial: ++serial,
       tagName: String(tag).toUpperCase(),
       children: [],
       attributes: {},
       handlers: {},
+      listeners: {},
       textContent: "",
       className: "",
+      id: "",
       value: "",
       disabled: false,
       hidden: false,
+      selected: false,
+      isConnected: true,
+      title: "",
+      style: {},
+      options: [],
       max: 0,
       type: "",
       focus() {},
+      contains(node) {
+        let current = node;
+        while (current) {
+          if (current === this) return true;
+          current = current.parentNode;
+        }
+        return false;
+      },
+      removeAttribute(name) {
+        delete this.attributes[name];
+      },
+      dispatchEvent(event) {
+        const name = event && event.type;
+        event.currentTarget = this;
+        for (const handler of this.listeners[name] || []) handler.call(this, event);
+        if (typeof this["on" + name] === "function") this["on" + name](event);
+        return true;
+      },
+      getBoundingClientRect() {
+        return { left: 16, top: 40, right: 216, bottom: 74, width: 200, height: 34 };
+      },
       appendChild(child) {
         this.children.push(child);
+        child.parentNode = this;
+        if (this.tagName === "SELECT") this.options = this.children.filter((item) => item.tagName === "OPTION");
+        return child;
+      },
+      insertBefore(child, reference) {
+        const index = reference ? this.children.indexOf(reference) : -1;
+        if (index < 0) this.children.push(child);
+        else this.children.splice(index, 0, child);
         child.parentNode = this;
         return child;
       },
@@ -603,12 +644,14 @@ function createMockDom() {
       },
       setAttribute(name, value) {
         this.attributes[name] = String(value);
+        if (name === "id") this.id = String(value);
       },
       getAttribute(name) {
         return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
       },
       addEventListener(name, handler) {
         this.handlers[name] = handler;
+        (this.listeners[name] ||= []).push(handler);
       },
       querySelectorAll(selector) {
         const found = [];
@@ -639,14 +682,39 @@ function createMockDom() {
     return el;
   }
 
+  const body = makeElement("body");
+  const documentElement = makeElement("html");
+  documentElement.clientWidth = 1280;
+  documentElement.clientHeight = 800;
   return {
     document: {
       readyState: "complete",
+      body,
+      documentElement,
       addEventListener() {},
+      removeEventListener() {},
       createElement: makeElement,
+      createEvent() {
+        return { initEvent(type) { this.type = type; } };
+      },
+      querySelector(selector) {
+        const match = /^label\[for='([^']+)'\]$/.exec(selector);
+        if (!match) return null;
+        for (const element of registry.values()) {
+          if (element.tagName === "LABEL" && element.getAttribute("for") === match[1]) return element;
+        }
+        return null;
+      },
+      querySelectorAll(selector) {
+        if (selector === "select") return body.querySelectorAll(selector);
+        return body.querySelectorAll(selector);
+      },
       getElementById(id) {
         if (!registry.has(id)) {
-          registry.set(id, makeElement("div"));
+          const element = makeElement("div");
+          element.id = id;
+          body.appendChild(element);
+          registry.set(id, element);
         }
         return registry.get(id);
       }
@@ -710,7 +778,9 @@ async function mountUi(options) {
       },
       confirm: () => true,
       setTimeout,
-      clearTimeout
+      clearTimeout,
+      addEventListener() {},
+      removeEventListener() {}
     },
     AbortController,
     TextEncoder,
@@ -974,7 +1044,9 @@ test("manual models draft adding, deletion and save lifecycle", async () => {
       location: { protocol: "http:", hostname: "127.0.0.1", pathname: "/v0/resource/plugins/cliproxyapi-commandcode-provider/ui" },
       confirm: () => true,
       setTimeout,
-      clearTimeout
+      clearTimeout,
+      addEventListener() {},
+      removeEventListener() {}
     },
     AbortController,
     TextEncoder,
@@ -1450,4 +1522,61 @@ test("save mode preserves existing rows and selection on empty, missing, or vani
 test("ui.html settings copy explicitly states per-credential override and default for legacy keys", () => {
   const html = readAsset("ui.html");
   assert.ok(html.includes("每个凭据单独配置，下面是缺少mode旧凭据的默认值"));
+});
+
+// The visual select must commit through the native control and must not persist highlight classes.
+test("select controller commits one native change and clears menus when rows are replaced", () => {
+  const dom = createMockDom();
+  const doc = dom.document;
+  const select = doc.createElement("select");
+  select.id = "import-mode";
+  for (const [value, label] of [["cli", "CLI"], ["provider", "Provider"]]) {
+    const option = doc.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
+  }
+  select.value = "cli";
+  doc.body.appendChild(select);
+  select.changeCount = 0;
+  select.addEventListener("change", function () { this.changeCount += 1; });
+  const controller = ui.createSelectController({
+    innerWidth: 390,
+    innerHeight: 700,
+    addEventListener() {},
+    removeEventListener() {}
+  }, doc);
+  controller.refresh();
+  const trigger = select.parentNode.children.find((child) => child.getAttribute("role") === "combobox");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  trigger.handlers.click({});
+  const listboxes = () => doc.body.querySelectorAll("[role='listbox']");
+  const optionNodes = () => doc.body.querySelectorAll("[role='option']");
+  assert.equal(listboxes().length, 1);
+  const options = optionNodes();
+  options[1].handlers.mouseenter({ currentTarget: options[1] });
+  assert.equal(options[1].className.includes("is-highlighted"), true);
+  options[1].handlers.click({ currentTarget: options[1] });
+  assert.equal(select.value, "provider");
+  assert.equal(select.changeCount, 1);
+  assert.equal(listboxes().length, 0);
+  assert.equal(doc.body.querySelectorAll("[role='option']").length, 0);
+
+  trigger.handlers.keydown({ key: "ArrowDown", preventDefault() {}, currentTarget: trigger });
+  trigger.handlers.keydown({ key: "Escape", preventDefault() {}, currentTarget: trigger });
+  assert.equal(select.value, "provider");
+  assert.equal(select.changeCount, 1);
+  assert.equal(listboxes().length, 0);
+
+  select.disabled = true;
+  controller.refresh();
+  trigger.handlers.click({});
+  assert.equal(trigger.disabled, true);
+  assert.equal(listboxes().length, 0);
+
+  select.isConnected = false;
+  controller.refresh();
+  assert.equal(select.parentNode, null);
+  controller.refresh();
+  assert.equal(doc.body.querySelectorAll(".cpa-select-menu").length, 0);
 });
