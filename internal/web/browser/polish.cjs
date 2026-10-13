@@ -238,6 +238,12 @@ async function main() {
         await page.screenshot({ path: path.join(out, theme + '-' + width + '-monthly-quota.png'), animations: 'disabled' });
         await frame.locator('#import-mode-trigger').evaluate((el) => {
           if (document.documentElement.scrollWidth > window.innerWidth) throw new Error('page overflow');
+          const quotaWrap = document.getElementById('quota-table-wrap');
+          if (window.innerWidth < 600 && quotaWrap.scrollWidth <= quotaWrap.clientWidth) {
+            throw new Error('narrow quota table must scroll inside its wrapper');
+          }
+          const desc = document.querySelector('#quota-body .cell-desc');
+          if (desc.getBoundingClientRect().width < 200) throw new Error('quota description collapsed');
           if (Math.round(el.getBoundingClientRect().height) !== 34) throw new Error('trigger height');
           const small = document.querySelector('.cell-mode .cpa-select-trigger');
           if (Math.round(small.getBoundingClientRect().height) !== 28) throw new Error('row trigger height');

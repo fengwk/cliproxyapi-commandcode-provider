@@ -535,9 +535,9 @@ td.cell-actions button + button {
   margin-left: 0.4rem;
 }
 
-/* The quota table fits the viewport; only the progress column can grow. */
+/* Keep quota fields readable; narrow screens scroll inside the table wrapper. */
 .quota-table {
-  min-width: 0;
+  min-width: 48rem;
 }
 
 .quota-table th:first-child,
@@ -550,9 +550,14 @@ td.cell-actions button + button {
 /* The quota source note wraps inside a bounded width so the table keeps its
    internal horizontal scroll on narrow viewports instead of widening the page. */
 .quota-table .cell-desc {
+  min-width: 14rem;
   max-width: 16rem;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.quota-table td:nth-child(5) {
+  white-space: nowrap;
 }
 
 progress {
