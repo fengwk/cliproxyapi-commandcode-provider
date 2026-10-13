@@ -213,8 +213,18 @@ func TestQuotaIsReadOnlyAndScoped(t *testing.T) {
 	buckets := collectBuckets(body)
 	assertFraction(t, buckets, "five-hour", 0.75)
 	assertFraction(t, buckets, "weekly", 0.7)
-	if !bytes.Contains(body, []byte("five-hour")) || !bytes.Contains(body, []byte("weekly")) {
+	// The monthly window is metered against the reliable API period grant
+	// (monthlyCredits 70 / granted 140 = 0.5) and cites its source, while the
+	// five-hour/weekly windows above are unchanged.
+	assertFraction(t, buckets, "monthly", 0.5)
+	if !bytes.Contains(body, []byte("five-hour")) || !bytes.Contains(body, []byte("weekly")) || !bytes.Contains(body, []byte("monthly")) {
 		t.Errorf("quota response missing window names: %s", truncate(body, 300))
+	}
+	if !bytes.Contains(body, []byte("API period grant")) {
+		t.Errorf("monthly bucket must cite its data source: %s", truncate(body, 300))
+	}
+	if !bytes.Contains(body, []byte("2026-11-01T00:00:00Z")) {
+		t.Errorf("monthly bucket must carry the real period reset: %s", truncate(body, 300))
 	}
 
 	// Unknown credential: 404 and no upstream probe.

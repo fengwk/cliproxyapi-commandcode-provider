@@ -547,6 +547,14 @@ td.cell-actions button + button {
   white-space: nowrap;
 }
 
+/* The quota source note wraps inside a bounded width so the table keeps its
+   internal horizontal scroll on narrow viewports instead of widening the page. */
+.quota-table .cell-desc {
+  max-width: 16rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 progress {
   accent-color: var(--primary-color);
 }

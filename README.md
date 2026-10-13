@@ -162,7 +162,17 @@ POST /v0/management/plugins/cliproxyapi-commandcode-provider/quota
 Body: {"auth_index":"<来自 keys 列表的 index>"}
 ```
 
-`groups` 只给出已知 `cap>0` 的真实窗口（`five-hour` / `weekly`），`remainingFraction = clamp(1 - used/cap, 0, 1)`，`resetTime` 来自毫秒时间字段；缺失窗口不伪造为 0。`summary` 只展示 credits API 明确给出的 `monthly_credits`/`purchased_credits`/`free_credits` 与同账号 `total_credits`，`unit=credits`、`format=number`，**不猜 USD**，不把月余额当上限画进度条。
+`groups` 按 `five-hour`、`weekly`、`monthly` 顺序给出可信窗口：五小时/周窗口只取已知 `cap>0` 的真实数据，`remainingFraction = clamp(1 - used/cap, 0, 1)`，`resetTime` 来自毫秒时间字段；缺失窗口不伪造为 0。
+
+`monthly`（月度额度）只有在能从可信来源得到月度总额时才发布，`remainingFraction = clamp(monthlyCredits / total, 0, 1)`，其 `description`（纯文本，经控制字符/长度清洗）注明总额与来源：
+
+- `/alpha/billing/credits` 返回可用的本期授额 `monthlyCreditsGranted`（可选字段）时，`total = max(grant, 官网套餐基准)`；
+- 否则按**带日期的官网套餐基准快照**（2026-10-14，来源 commandcode.ai 公开静态 `plan-tiers` 资源）：已知套餐用其基准，`teams-pro` 按有效席位（`floor(quantity)`，缺失或 `<1` 记 1）乘每席位基准；未知套餐且无授额时**不发布**月度窗口；
+- `past_due`、月余额缺失、授额为负数等非法值、总额 `≤0` 或溢出时均不发布月度窗口，也不回退伪造；`resetTime` 只取真实账期结束时间（RFC3339 或 `YYYY-MM-DD`），**不推测固定自然月**。
+
+`summary` 只展示 credits API 明确给出的 `monthly_credits`/`purchased_credits`/`free_credits` 与同账号 `total_credits`，`unit=credits`、`format=number`，**不猜 USD**。月余额（`monthly_credits`）是剩余量，**不是**月度上限；不把它当分母，也不把旧额度、充值或免费余额混入月 cap。
+
+官网 Web 走 `/internal/billing/**`，插件与 CLI 走 `/alpha/billing/**`；公开静态资源证明的字段形状**不等于**每个账号的 `/alpha` 响应都会返回 `monthlyCreditsGranted`。本仓库在**无真实账号/凭据**下验收，**未实测真实账号返回**。
 
 宿主 reset cooldown 只重置 CPA 本地路由状态，**绝不**表示恢复供应商额度。
 

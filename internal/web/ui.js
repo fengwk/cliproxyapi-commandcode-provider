@@ -19,10 +19,12 @@ var MAX_CELL_LENGTH = 200;
 var MAX_FILE_NAME_LENGTH = 255;
 var MAX_AUTH_INDEX_LENGTH = 200;
 
-// CommandCode rate limit quota windows (five-hour and weekly).
+// CommandCode rate limit quota windows (five-hour, weekly, monthly). The UI
+// renders whatever subset the host returns and never fabricates a missing one.
 var QUOTA_WINDOWS = [
   { window: "five-hour", label: "5小时窗口" },
-  { window: "weekly", label: "每周窗口" }
+  { window: "weekly", label: "每周窗口" },
+  { window: "monthly", label: "月度额度" }
 ];
 
 // Strict RFC3339 timestamp shape, matching the host's time.RFC3339 parsing.
@@ -345,13 +347,15 @@ function parseQuotaResponse(payload) {
         resetTimeFormatted = formatQuotaReset(bucket.resetTime);
       }
       var remainingPercent = Math.round(fraction * 100);
+      // The description is upstream text: render it as bounded plain text only.
       byWindow[winName] = {
         window: winName,
         label: label,
         remainingFraction: fraction,
         remainingPercent: remainingPercent,
         usedPercent: 100 - remainingPercent,
-        resetTime: resetTimeFormatted
+        resetTime: resetTimeFormatted,
+        description: toCellText(bucket.description)
       };
     }
   }
@@ -1958,6 +1962,10 @@ function initUi() {
         progressCell.appendChild(progress);
         tr.appendChild(progressCell);
         appendCell(tr, bucket.resetTime || "—");
+        var descCell = appendCell(tr, bucket.description || "—", "cell-desc");
+        if (bucket.description) {
+          descCell.title = bucket.description;
+        }
         el.quotaBody.appendChild(tr);
       }
     } else {

@@ -400,6 +400,95 @@ test("parseQuotaResponse rejects malformed or duplicate data", () => {
   assert.equal(ui.parseQuotaResponse(badReset).ok, false);
 });
 
+test("parseQuotaResponse parses a monthly bucket with a plaintext source description", () => {
+  const parsed = ui.parseQuotaResponse({
+    subscription: { plan: "individual-goat", status: "active" },
+    summary: { monthly_credits: 70, total_credits: 70 },
+    groups: [
+      {
+        buckets: [
+          {
+            window: "monthly",
+            remainingFraction: 1,
+            resetTime: "2026-11-01T00:00:00Z",
+            description: "Monthly cap 70 credits (source: official plan baseline, 2026-10-14 snapshot)"
+          }
+        ]
+      }
+    ]
+  });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.buckets.length, 1);
+  assert.equal(parsed.buckets[0].window, "monthly");
+  assert.equal(parsed.buckets[0].label, "月度额度");
+  assert.equal(parsed.buckets[0].remainingPercent, 100);
+  assert.equal(parsed.buckets[0].usedPercent, 0);
+  assert.equal(parsed.buckets[0].resetTime, "2026-11-01 00:00 UTC");
+  assert.match(parsed.buckets[0].description, /official plan baseline/);
+});
+
+test("parseQuotaResponse cleans the monthly description as bounded plain text", () => {
+  const parsed = ui.parseQuotaResponse({
+    subscription: { plan: "individual-goat" },
+    groups: [
+      {
+        buckets: [
+          { window: "monthly", remainingFraction: 0.5, description: "src\u0007 <b>x</b> " + "z".repeat(300) }
+        ]
+      }
+    ]
+  });
+  assert.equal(parsed.ok, true);
+  const desc = parsed.buckets[0].description;
+  assert.ok(!desc.includes("\u0007"));
+  assert.ok(desc.length <= 201);
+  assert.ok(desc.startsWith("src"));
+  // Angle brackets stay literal text; the UI renders it via textContent only.
+  assert.ok(desc.includes("<b>x</b>"));
+});
+
+test("parseQuotaResponse never fabricates a monthly bucket and orders five-hour, weekly, monthly", () => {
+  const absent = ui.parseQuotaResponse({
+    subscription: { plan: "individual-goat" },
+    groups: [{ buckets: [{ window: "five-hour", remainingFraction: 0.5 }] }]
+  });
+  assert.equal(absent.ok, true);
+  assert.equal(absent.buckets.some((b) => b.window === "monthly"), false);
+
+  const ordered = ui.parseQuotaResponse({
+    subscription: { plan: "individual-goat" },
+    groups: [
+      {
+        buckets: [
+          { window: "monthly", remainingFraction: 0.5 },
+          { window: "weekly", remainingFraction: 0.5 },
+          { window: "five-hour", remainingFraction: 0.5 }
+        ]
+      }
+    ]
+  });
+  assert.deepEqual(ordered.buckets.map((b) => b.window), ["five-hour", "weekly", "monthly"]);
+
+  const duplicate = ui.parseQuotaResponse({
+    subscription: { plan: "individual-goat" },
+    groups: [
+      {
+        buckets: [
+          { window: "monthly", remainingFraction: 0.5 },
+          { window: "monthly", remainingFraction: 0.4 }
+        ]
+      }
+    ]
+  });
+  assert.equal(duplicate.ok, false);
+
+  const badFraction = ui.parseQuotaResponse({
+    subscription: { plan: "individual-goat" },
+    groups: [{ buckets: [{ window: "monthly", remainingFraction: 2 }] }]
+  });
+  assert.equal(badFraction.ok, false);
+});
+
 test("describeQuotaFailure returns fixed messages without echoing server text", () => {
   assert.match(ui.describeQuotaFailure(400), /400/);
   assert.match(ui.describeQuotaFailure(404), /版本/);
@@ -905,6 +994,50 @@ test("quota query displays subscription, credits summary, and five-hour/weekly b
   assert.equal(rows[1].children[0].textContent, "每周窗口");
   assert.equal(rows[1].children[1].textContent, "50%");
   assert.equal(rows[1].children[2].textContent, "50%");
+});
+
+test("quota query renders a monthly progress row with its source description", async () => {
+  const { get, settle } = await mountUi({
+    files: [{ name: "commandcode-key-1.json", auth_index: "auth-idx-1" }],
+    quotaResponse: {
+      status: 200,
+      body: {
+        subscription: { plan: "individual-goat", status: "active" },
+        summary: { monthly_credits: 70, total_credits: 70 },
+        groups: [
+          {
+            buckets: [
+              { window: "five-hour", remainingFraction: 0.5, resetTime: "2026-10-12T15:00:00Z" },
+              { window: "weekly", remainingFraction: 0.25, resetTime: "2026-10-19T00:00:00Z" },
+              {
+                window: "monthly",
+                remainingFraction: 1,
+                resetTime: "2026-11-01T00:00:00Z",
+                description: "Monthly cap 70 credits (source: official plan baseline, 2026-10-14 snapshot)"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  });
+
+  const quotaBtn = get("files-body").querySelectorAll("button[data-action='quota']")[0];
+  quotaBtn.handlers.click({ currentTarget: quotaBtn });
+  await settle();
+
+  const rows = get("quota-body").children;
+  assert.equal(rows.length, 3);
+  assert.equal(rows[2].children[0].textContent, "月度额度");
+  assert.equal(rows[2].children[1].textContent, "100%");
+  assert.equal(rows[2].children[2].textContent, "0%");
+  assert.equal(rows[2].children[3].firstChild.value, 1);
+  assert.equal(rows[2].children[4].textContent, "2026-11-01 00:00 UTC");
+  assert.match(rows[2].children[5].textContent, /official plan baseline/);
+  assert.equal(
+    rows[2].children[5].title,
+    "Monthly cap 70 credits (source: official plan baseline, 2026-10-14 snapshot)"
+  );
 });
 
 test("quota auth failure (401/403) clears credentials and hides quota panel", async () => {

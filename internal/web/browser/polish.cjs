@@ -13,6 +13,22 @@ const resource = '/v0/resource/plugins/' + plugin;
 const management = '/v0/management/plugins/' + plugin;
 const secret = 'fake-browser-management-key';
 const authIndex = '0123456789abcdef';
+// Synthetic three-window quota: the monthly row is metered against the official
+// plan baseline snapshot and carries its source as plain text.
+const quotaFixture = {
+  subscription: { plan: 'individual-goat', status: 'active' },
+  summary: { monthly_credits: 70, total_credits: 70 },
+  groups: [{
+    buckets: [
+      { window: 'five-hour', remainingFraction: 0.5, resetTime: '2026-10-12T15:00:00Z' },
+      { window: 'weekly', remainingFraction: 0.25, resetTime: '2026-10-19T00:00:00Z' },
+      {
+        window: 'monthly', remainingFraction: 1, resetTime: '2026-11-01T00:00:00Z',
+        description: 'Monthly cap 70 credits (source: official plan baseline, 2026-10-14 snapshot)'
+      }
+    ]
+  }]
+};
 const source = fs.readFileSync(path.resolve(root, '../provider/management.go'), 'utf8');
 const policies = [...source.matchAll(/headers\.Set\("Content-Security-Policy", "([^"]+)"\)/g)];
 assert.equal(policies.length, 1, 'must read the single production CSP');
@@ -23,7 +39,7 @@ async function main() {
   fs.mkdirSync(out, { recursive: true });
   const calls = [];
   const results = [];
-  const controls = { mode: 'cli', fail: false, confirm: true };
+  const controls = { mode: 'cli', fail: false, confirm: true, monthlyQuota: true };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1');
@@ -56,7 +72,17 @@ async function main() {
       for await (const chunk of req) body += chunk;
       calls.push({ method: req.method, path: url.pathname, body });
       res.setHeader('Content-Type', 'application/json');
-      if (url.pathname.endsWith('/keys') && req.method === 'PATCH') {
+      if (url.pathname.endsWith('/quota') && req.method === 'POST') {
+        assert.deepEqual(JSON.parse(body), { auth_index: authIndex });
+        const quotaBody = controls.monthlyQuota
+          ? quotaFixture
+          : {
+            subscription: quotaFixture.subscription,
+            summary: quotaFixture.summary,
+            groups: [{ buckets: quotaFixture.groups[0].buckets.slice(0, 2) }]
+          };
+        res.end(JSON.stringify(quotaBody));
+      } else if (url.pathname.endsWith('/keys') && req.method === 'PATCH') {
         if (controls.fail) { res.writeHead(500).end('{}'); return; }
         const patch = JSON.parse(body);
         assert.deepEqual(Object.keys(patch).sort(), ['auth_index', 'mode']);
@@ -103,6 +129,31 @@ async function main() {
     await frame.locator('#refresh-btn').click();
     await frame.locator('#manual-model-status').filter({ hasText: '已加载' }).waitFor();
     assert.equal(await frame.locator('#files-body b').count(), 0, 'labels remain text');
+
+    // Quota panel: three windows including the monthly meter with progress,
+    // real reset and plain-text source description.
+    await frame.locator("button[data-action='quota']").first().click();
+    await page.waitForFunction(() => {
+      const doc = document.querySelector('iframe').contentDocument;
+      return doc && doc.querySelectorAll('#quota-body tr').length === 3;
+    });
+    const quotaRows = frame.locator('#quota-body tr');
+    assert.equal(await quotaRows.nth(0).locator('td').nth(0).textContent(), '5小时窗口');
+    assert.equal(await quotaRows.nth(2).locator('td').nth(0).textContent(), '月度额度');
+    assert.equal(await quotaRows.nth(2).locator('progress').evaluate((el) => el.value), 1);
+    assert.equal(await quotaRows.nth(2).locator('td').nth(4).textContent(), '2026-11-01 00:00 UTC');
+    assert.match(await quotaRows.nth(2).locator('td').nth(5).textContent(), /official plan baseline/);
+
+    // When the monthly window is unavailable only the trusted older windows show.
+    controls.monthlyQuota = false;
+    await frame.locator("button[data-action='quota']").first().click();
+    await page.waitForFunction(() => {
+      const doc = document.querySelector('iframe').contentDocument;
+      return doc && doc.querySelectorAll('#quota-body tr').length === 2;
+    });
+    assert.equal(await frame.locator('#quota-body tr').nth(1).locator('td').nth(0).textContent(), '每周窗口');
+    controls.monthlyQuota = true;
+    results.push('quota panel renders five-hour/weekly/monthly with progress, reset and source; degrades to trusted windows');
 
     const importTrigger = frame.locator('#import-mode-trigger');
     await frame.locator('label[for="import-mode"]').click();

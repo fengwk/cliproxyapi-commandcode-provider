@@ -186,10 +186,11 @@ func chatStreamTruncated(native string) []byte {
 
 // quotaCreditsBody is the synthetic billing credits payload the plugin maps to
 // its read-only quota groups: a five-hour and a weekly window with used/cap and
-// millisecond reset times, plus explicit account credit components.
+// millisecond reset times, an explicit account credit breakdown, and a monthly
+// period grant used to meter the monthly window.
 func quotaCreditsBody() []byte {
 	return []byte(`{
-  "credits": {"monthlyCredits": 100, "purchasedCredits": 20, "freeCredits": 5},
+  "credits": {"monthlyCredits": 70, "monthlyCreditsGranted": 140, "purchasedCredits": 20, "freeCredits": 5},
   "windowLimits": {
     "fiveHour": {"used": 25, "cap": 100, "resetAt": 1791729940000},
     "weekly": {"used": 60, "cap": 200, "resetAt": 1792334740000}
@@ -199,7 +200,7 @@ func quotaCreditsBody() []byte {
 
 // quotaSubscriptionsBody is the synthetic plan payload.
 func quotaSubscriptionsBody() []byte {
-	return []byte(`{"success":true,"data":{"planId":"commandcode-go","status":"active","currentPeriodEnd":"2026-10-18T14:45:40Z"}}`)
+	return []byte(`{"success":true,"data":{"planId":"individual-goat","status":"active","currentPeriodEnd":"2026-11-01T00:00:00Z"}}`)
 }
 
 // sse renders one unnamed Server-Sent Event with CRLF framing.
