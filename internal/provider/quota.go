@@ -191,6 +191,11 @@ func parseCreditsShape(body []byte) (creditsShape, error) {
 	if payload.Credits == nil && payload.WindowLimits == nil {
 		return creditsShape{}, quotaInvalid()
 	}
+	if credits := payload.Credits; credits != nil {
+		if err := validateCreditComponents(credits.MonthlyCredits, credits.PurchasedCredits, credits.FreeCredits); err != nil {
+			return creditsShape{}, err
+		}
+	}
 	return payload, nil
 }
 
@@ -371,11 +376,16 @@ func validPeriodReset(facts *subscriptionFacts) (string, bool) {
 	if raw == "" {
 		return "", false
 	}
-	if instant, err := time.Parse(time.RFC3339, raw); err == nil {
-		return instant.UTC().Format(time.RFC3339Nano), true
-	}
-	if instant, err := time.Parse("2006-01-02", raw); err == nil {
-		return instant.UTC().Format(time.RFC3339Nano), true
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		instant, err := time.Parse(layout, raw)
+		if err != nil {
+			continue
+		}
+		utc := instant.UTC()
+		if year := utc.Year(); year < 1 || year > 9999 {
+			return "", false
+		}
+		return utc.Format(time.RFC3339Nano), true
 	}
 	return "", false
 }
@@ -399,10 +409,8 @@ func monthlyDescription(total float64, source, detail string) string {
 // finite is rejected outright rather than clamped, and the total is omitted if
 // it would overflow to infinity.
 func creditMetrics(monthly, purchased, free *float64) ([]pluginapi.QuotaMetric, error) {
-	for _, value := range []*float64{monthly, purchased, free} {
-		if value != nil && !finiteNonNegative(*value) {
-			return nil, quotaInvalid()
-		}
+	if err := validateCreditComponents(monthly, purchased, free); err != nil {
+		return nil, err
 	}
 	metrics := make([]pluginapi.QuotaMetric, 0, 4)
 	appendMetric := func(key, label string, value *float64) {
@@ -421,6 +429,17 @@ func creditMetrics(monthly, purchased, free *float64) ([]pluginapi.QuotaMetric, 
 		}
 	}
 	return metrics, nil
+}
+
+// Validate balances before fetching optional subscription metadata and before
+// exposing metrics to management clients.
+func validateCreditComponents(monthly, purchased, free *float64) error {
+	for _, value := range []*float64{monthly, purchased, free} {
+		if value != nil && !finiteNonNegative(*value) {
+			return quotaInvalid()
+		}
+	}
+	return nil
 }
 
 // finiteNonNegative reports a usable quota number: a real, non-negative value.

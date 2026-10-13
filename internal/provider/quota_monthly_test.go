@@ -291,3 +291,65 @@ func TestFetchQuotaSubscriptionFailureKeepsGrantAndWindows(t *testing.T) {
 		t.Fatalf("monthly from grant = %+v", monthly)
 	}
 }
+
+// Invalid balances must fail before the optional subscription probe, preserving
+// the original quota fetch's fail-fast behavior.
+func TestFetchQuotaInvalidBalanceSkipsSubscription(t *testing.T) {
+	for _, field := range []string{"monthlyCredits", "purchasedCredits", "freeCredits"} {
+		t.Run(field, func(t *testing.T) {
+			var calls []string
+			host := &fakeHost{}
+			host.handler = func(method string, payload []byte) (any, error) {
+				switch method {
+				case pluginabi.MethodHostHTTPOperationOpen:
+					return map[string]string{"operation_id": "op"}, nil
+				case pluginabi.MethodHostHTTPDo:
+					var req struct {
+						URL string `json:"url"`
+					}
+					if err := json.Unmarshal(payload, &req); err != nil {
+						t.Fatal(err)
+					}
+					calls = append(calls, req.URL)
+					return httpOKResult(`{"credits":{"`+field+`":-1}}`, nil), nil
+				}
+				return nil, nil
+			}
+			manager := host.manager()
+			manager.setConfig(Config{Mode: ModeCLI, BaseURL: "http://127.0.0.1:9"})
+			_, err := manager.fetchQuota(rpcQuotaRequest{QuotaFetchRequest: pluginapi.QuotaFetchRequest{
+				Provider: ProviderID, Attributes: map[string]string{"api_key": "synthetic-quota-key"},
+			}})
+			if err == nil {
+				t.Fatal("negative balance must fail")
+			}
+			if len(calls) != 1 || !strings.HasSuffix(calls[0], endpointCredits) {
+				t.Fatalf("invalid credits triggered an unnecessary subscription probe: %v", calls)
+			}
+		})
+	}
+}
+
+// UTC normalization must never publish an out-of-range RFC3339 year that would
+// make the UI reject the entire otherwise-valid quota response.
+func TestMonthlyResetRejectsUnrepresentableUTCYear(t *testing.T) {
+	payload := creditsPayload(t, `{"credits":{"monthlyCredits":35}}`)
+	for _, end := range []string{"0000-01-01", "0000-01-01T00:00:00Z", "9999-12-31T23:59:59-01:00"} {
+		t.Run(end, func(t *testing.T) {
+			bucket := assertMonthly(t, payload, &subscriptionFacts{
+				PlanID: "individual-goat", CurrentPeriodEnd: end,
+			}, true, 0.5)
+			if bucket.ResetTime != "" {
+				t.Fatalf("unrepresentable reset must be omitted: %q", bucket.ResetTime)
+			}
+		})
+	}
+}
+
+// An explicit period grant already accounts for seats; multiplying it again
+// would overstate a team's monthly total.
+func TestMonthlyTeamGrantDoesNotMultiplySeatsAgain(t *testing.T) {
+	quantity := 3.0
+	payload := creditsPayload(t, `{"credits":{"monthlyCredits":20,"monthlyCreditsGranted":100}}`)
+	assertMonthly(t, payload, &subscriptionFacts{PlanID: "teams-pro", Quantity: &quantity}, true, 0.2)
+}

@@ -229,6 +229,13 @@ async function main() {
       }, theme);
       for (const width of [1280, 768, 390]) {
         await page.setViewportSize({ width, height: 900 });
+        await frame.locator("button[data-action='quota']").first().click();
+        await page.waitForFunction(() => {
+          const doc = document.querySelector('iframe').contentDocument;
+          return doc && doc.querySelectorAll('#quota-body tr').length === 3;
+        });
+        await frame.locator('#quota-panel').scrollIntoViewIfNeeded();
+        await page.screenshot({ path: path.join(out, theme + '-' + width + '-monthly-quota.png'), animations: 'disabled' });
         await frame.locator('#import-mode-trigger').evaluate((el) => {
           if (document.documentElement.scrollWidth > window.innerWidth) throw new Error('page overflow');
           if (Math.round(el.getBoundingClientRect().height) !== 34) throw new Error('trigger height');

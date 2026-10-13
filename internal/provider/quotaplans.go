@@ -13,8 +13,8 @@ const planTeamsPro = "teams-pro"
 
 // officialPlanMonthlyCredits maps the official plan ids observed on the
 // snapshot date to their published monthly totalCredits baseline. These values
-// come from the public plan-tiers asset, not from any account API, and are used
-// only when a reliable per-period grant is unavailable.
+// come from the public plan-tiers asset, not from any account API. The reviewed
+// meter uses them as the grant's minimum or as fallback when no grant is usable.
 var officialPlanMonthlyCredits = map[string]float64{
 	"individual-go":       10,
 	"individual-go-v1":    10,
