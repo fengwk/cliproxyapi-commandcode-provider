@@ -151,6 +151,85 @@ func TestMalformedQuantityOnlyDisablesTeamBaseline(t *testing.T) {
 	assertMonthly(t, grant, &subscriptionFacts{PlanID: "teams-pro", QuantityIllegal: true}, true, 0.2)
 }
 
+// A wire seat quantity below one (including negatives) is legal and counts as a
+// single seat for a seat-based plan. This goes through the real
+// parseSubscriptionFacts/fetchQuota path, not hand-made facts.
+func TestWireQuantityBelowOneCountsAsOneSeat(t *testing.T) {
+	// teams-pro has no grant here; the 40-credit per-seat baseline with a
+	// 20-credit balance gives a 0.5 fraction.
+	credits := `{"credits":{"monthlyCredits":20}}`
+	for _, raw := range []string{"-1", "-0.5", "0", "0.5", "null"} {
+		raw := raw
+		t.Run("quantity="+raw, func(t *testing.T) {
+			subs := `{"data":{"planId":"teams-pro","status":"active","quantity":` + raw + `}}`
+			facts := parseSubscriptionFacts([]byte(subs))
+			if facts == nil || facts.QuantityIllegal {
+				t.Fatalf("quantity %s is a legal seat count: %+v", raw, facts)
+			}
+			bucket, ok := bucketsByWindow(fetchQuotaFrom(t, credits, subs))[quotaMonthlyWindow]
+			if !ok {
+				t.Fatalf("quantity %s must count as one seat and publish monthly", raw)
+			}
+			if math.Abs(bucket.RemainingFraction-0.5) > 1e-9 {
+				t.Fatalf("quantity %s fraction = %v, want 0.5", raw, bucket.RemainingFraction)
+			}
+			if !strings.Contains(bucket.Description, "team 1 seats") {
+				t.Fatalf("quantity %s must note the single seat: %q", raw, bucket.Description)
+			}
+		})
+	}
+	// An absent quantity also counts as one seat.
+	resp := fetchQuotaFrom(t, credits, `{"data":{"planId":"teams-pro","status":"active"}}`)
+	if bucket, ok := bucketsByWindow(resp)[quotaMonthlyWindow]; !ok || math.Abs(bucket.RemainingFraction-0.5) > 1e-9 {
+		t.Fatalf("an absent quantity must count as one seat: %+v", bucket)
+	}
+	// A real integer seat count multiplies the per-seat baseline (20/120).
+	resp = fetchQuotaFrom(t, credits, `{"data":{"planId":"teams-pro","status":"active","quantity":3}}`)
+	if bucket, ok := bucketsByWindow(resp)[quotaMonthlyWindow]; !ok || math.Abs(bucket.RemainingFraction-20.0/120.0) > 1e-9 {
+		t.Fatalf("quantity 3 must multiply the baseline: %+v", bucket)
+	}
+}
+
+// A wrong-typed wire seat quantity is illegal and must not default to a single
+// seat for a seat-based plan, while the plan facts survive.
+func TestWireIllegalQuantityDoesNotDefaultToOneSeat(t *testing.T) {
+	credits := `{"credits":{"monthlyCredits":20}}`
+	illegal := map[string]string{
+		"string":   `"3"`,
+		"object":   `{"n":3}`,
+		"array":    `[3]`,
+		"bool":     `true`,
+		"overflow": `1e400`,
+	}
+	for name, raw := range illegal {
+		raw := raw
+		t.Run(name, func(t *testing.T) {
+			subs := `{"data":{"planId":"teams-pro","status":"active","quantity":` + raw + `}}`
+			facts := parseSubscriptionFacts([]byte(subs))
+			if facts == nil || facts.PlanID != "teams-pro" || !facts.QuantityIllegal || facts.Quantity != nil {
+				t.Fatalf("an illegal quantity must be marked, not treated as missing: %+v", facts)
+			}
+			if bucket, ok := bucketsByWindow(fetchQuotaFrom(t, credits, subs))[quotaMonthlyWindow]; ok {
+				t.Fatalf("an illegal quantity must not default to one seat: %+v", bucket)
+			}
+		})
+	}
+}
+
+// A valid period grant is metered independently of the seat field.
+func TestWireValidGrantIgnoresQuantity(t *testing.T) {
+	resp := fetchQuotaFrom(t,
+		`{"credits":{"monthlyCredits":20,"monthlyCreditsGranted":100}}`,
+		`{"data":{"planId":"teams-pro","status":"active","quantity":"3"}}`)
+	bucket, ok := bucketsByWindow(resp)[quotaMonthlyWindow]
+	if !ok || math.Abs(bucket.RemainingFraction-0.2) > 1e-9 {
+		t.Fatalf("a valid grant must meter regardless of the seat field: %+v", bucket)
+	}
+	if !strings.Contains(bucket.Description, "API period grant") {
+		t.Fatalf("the grant must remain the source: %q", bucket.Description)
+	}
+}
+
 // A malformed optional quantity must not bypass a returned past_due status: the
 // full fetch keeps the real window but publishes no monthly meter.
 func TestMalformedQuantityDoesNotBypassPastDue(t *testing.T) {

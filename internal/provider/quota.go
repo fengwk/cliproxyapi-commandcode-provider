@@ -267,12 +267,17 @@ func parseSubscriptionFacts(body []byte) *subscriptionFacts {
 		CurrentPeriodEnd: payload.Data.CurrentPeriodEnd,
 		Transition:       transitionMarker(payload.Data.CancelAt) || transitionMarker(payload.Data.PendingPhase),
 	}
-	quantity := decodeOptionalNumber(payload.Data.Quantity)
-	if quantity.ok {
-		value := quantity.value
-		facts.Quantity = &value
+	// The optional seat count is decoded in isolation: a wrong type is illegal
+	// (never silently one seat), while any finite number — including <1 or a
+	// negative — is kept and resolved by effectiveSeats (which floors to one).
+	if raw := payload.Data.Quantity; len(raw) > 0 {
+		var value float64
+		if err := json.Unmarshal(raw, &value); err != nil {
+			facts.QuantityIllegal = true
+		} else {
+			facts.Quantity = &value
+		}
 	}
-	facts.QuantityIllegal = quantity.illegal
 	return facts
 }
 
@@ -298,23 +303,29 @@ func monthlyBucket(payload creditsShape, facts *subscriptionFacts) (pluginapi.Qu
 		return pluginapi.QuotaBucket{}, false
 	}
 
-	grant := decodeOptionalNumber(payload.Credits.MonthlyCreditsGranted)
-	if grant.illegal {
-		// An explicit but illegal grant is corrupt state: never mask it with the
-		// static baseline as a normal-looking monthly meter.
-		return pluginapi.QuotaBucket{}, false
+	// The optional grant is decoded here, in isolation from the core balances: a
+	// wrong-typed, non-finite or negative grant only forbids the monthly meter
+	// and must never be masked by the static baseline. An absent/null grant (and
+	// an explicit zero) keeps the documented baseline fallback.
+	var grant *float64
+	if raw := payload.Credits.MonthlyCreditsGranted; len(raw) > 0 {
+		var value float64
+		if err := json.Unmarshal(raw, &value); err != nil || !finiteNonNegative(value) {
+			return pluginapi.QuotaBucket{}, false
+		}
+		grant = &value
 	}
 	base, planKnown := officialPlanBase(facts)
-	useGrant := grant.ok && grant.value > 0
+	useGrant := grant != nil && *grant > 0
 
 	var total float64
 	source := ""
 	switch {
-	case useGrant && planKnown && base > grant.value:
+	case useGrant && planKnown && base > *grant:
 		total = base
 		source = planBaselineSource
 	case useGrant:
-		total = grant.value
+		total = *grant
 		source = apiGrantSource
 	case planKnown:
 		total = base
@@ -464,35 +475,6 @@ func validateCreditComponents(monthly, purchased, free *float64) error {
 		}
 	}
 	return nil
-}
-
-// optionalNumber is the tri-state of an optional wire number decoded in
-// isolation from the core fields: absent (missing or null), a usable value, or
-// present-but-illegal. An illegal value must never be treated as absent, or it
-// would silently fall back to a default that the upstream did not ask for.
-type optionalNumber struct {
-	value   float64
-	ok      bool // usable: finite and non-negative
-	illegal bool // present but not a usable number
-}
-
-// decodeOptionalNumber isolates one optional numeric wire field so a wrong type
-// in it cannot fail the surrounding payload. A field that is absent or JSON null
-// is treated as missing; anything that is not a finite, non-negative number is
-// reported illegal.
-func decodeOptionalNumber(raw json.RawMessage) optionalNumber {
-	text := strings.TrimSpace(string(raw))
-	if text == "" || text == "null" {
-		return optionalNumber{}
-	}
-	var value float64
-	if err := json.Unmarshal([]byte(text), &value); err != nil {
-		return optionalNumber{illegal: true}
-	}
-	if !finiteNonNegative(value) {
-		return optionalNumber{illegal: true}
-	}
-	return optionalNumber{value: value, ok: true}
 }
 
 // transitionMarker reports whether an optional subscription transition field
