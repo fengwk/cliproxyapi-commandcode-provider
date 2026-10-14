@@ -63,16 +63,10 @@ type accountWindow struct {
 	ResetAt *int64   `json:"resetAt"` // Unix milliseconds
 }
 
-// creditsShape is the /alpha/billing/credits payload. MonthlyCreditsGranted is a
-// raw optional field so a wrong type in it cannot fail the decode of the core
-// balances or the window limits; it is validated in isolation by the monthly
-// meter.
+// creditsShape isolates the optional grant from the core balances and windows.
 type creditsShape struct {
 	Credits *struct {
-		MonthlyCredits *float64 `json:"monthlyCredits"`
-		// MonthlyCreditsGranted is an optional per-period grant. When present it
-		// is authoritative for the monthly total; it is absent, not zero, when
-		// the upstream does not report one.
+		MonthlyCredits        *float64        `json:"monthlyCredits"`
 		MonthlyCreditsGranted json.RawMessage `json:"monthlyCreditsGranted"`
 		PurchasedCredits      *float64        `json:"purchasedCredits"`
 		FreeCredits           *float64        `json:"freeCredits"`
@@ -267,15 +261,11 @@ func parseSubscriptionFacts(body []byte) *subscriptionFacts {
 		CurrentPeriodEnd: payload.Data.CurrentPeriodEnd,
 		Transition:       transitionMarker(payload.Data.CancelAt) || transitionMarker(payload.Data.PendingPhase),
 	}
-	// The optional seat count is decoded in isolation: a wrong type is illegal
-	// (never silently one seat), while any finite number — including <1 or a
-	// negative — is kept and resolved by effectiveSeats (which floors to one).
+	// Keep absent/null distinct from invalid; effectiveSeats handles finite <1.
 	if raw := payload.Data.Quantity; len(raw) > 0 {
-		var value float64
-		if err := json.Unmarshal(raw, &value); err != nil {
+		if err := json.Unmarshal(raw, &facts.Quantity); err != nil {
+			facts.Quantity = nil
 			facts.QuantityIllegal = true
-		} else {
-			facts.Quantity = &value
 		}
 	}
 	return facts
@@ -303,17 +293,15 @@ func monthlyBucket(payload creditsShape, facts *subscriptionFacts) (pluginapi.Qu
 		return pluginapi.QuotaBucket{}, false
 	}
 
-	// The optional grant is decoded here, in isolation from the core balances: a
-	// wrong-typed, non-finite or negative grant only forbids the monthly meter
-	// and must never be masked by the static baseline. An absent/null grant (and
-	// an explicit zero) keeps the documented baseline fallback.
+	// Invalid grants forbid only this meter; absent/null/zero keep the fallback.
 	var grant *float64
 	if raw := payload.Credits.MonthlyCreditsGranted; len(raw) > 0 {
-		var value float64
-		if err := json.Unmarshal(raw, &value); err != nil || !finiteNonNegative(value) {
+		if err := json.Unmarshal(raw, &grant); err != nil {
 			return pluginapi.QuotaBucket{}, false
 		}
-		grant = &value
+	}
+	if grant != nil && !finiteNonNegative(*grant) {
+		return pluginapi.QuotaBucket{}, false
 	}
 	base, planKnown := officialPlanBase(facts)
 	useGrant := grant != nil && *grant > 0
@@ -477,12 +465,8 @@ func validateCreditComponents(monthly, purchased, free *float64) error {
 	return nil
 }
 
-// transitionMarker reports whether an optional subscription transition field
-// (cancelAt or pendingPhase) is present with a real marker. The public meter
-// computes hasPeriod && !cancelAt && !pendingPhase, so a present non-empty value
-// suppresses the promised reset. An absent, null or empty-string field is not a
-// transition; any other anomaly is conservatively treated as one (the date is
-// omitted, never fabricated).
+// Nonempty cancelAt/pendingPhase markers suppress the reset. Unexpected types
+// conservatively omit only the date rather than promise a renewal.
 func transitionMarker(raw json.RawMessage) bool {
 	text := strings.TrimSpace(string(raw))
 	return text != "" && text != "null" && text != `""`

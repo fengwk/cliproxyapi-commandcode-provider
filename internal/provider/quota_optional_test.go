@@ -166,6 +166,9 @@ func TestWireQuantityBelowOneCountsAsOneSeat(t *testing.T) {
 			if facts == nil || facts.QuantityIllegal {
 				t.Fatalf("quantity %s is a legal seat count: %+v", raw, facts)
 			}
+			if raw == "null" && facts.Quantity != nil {
+				t.Fatalf("null quantity must remain absent: %+v", facts)
+			}
 			bucket, ok := bucketsByWindow(fetchQuotaFrom(t, credits, subs))[quotaMonthlyWindow]
 			if !ok {
 				t.Fatalf("quantity %s must count as one seat and publish monthly", raw)

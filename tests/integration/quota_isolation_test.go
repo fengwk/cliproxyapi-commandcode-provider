@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // bucketInfo is one rendered quota bucket: its remaining fraction and reset.
@@ -16,65 +18,31 @@ type bucketInfo struct {
 	reset    string
 }
 
-// collectBucketInfo scans a quota response for window buckets.
+// collectBucketInfo reads the standard quota response's window buckets.
 func collectBucketInfo(body []byte) map[string]bucketInfo {
-	var decoded any
+	var decoded pluginapi.QuotaFetchResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil
 	}
 	out := map[string]bucketInfo{}
-	var walk func(v any)
-	walk = func(v any) {
-		switch node := v.(type) {
-		case map[string]any:
-			if window, ok := node["window"].(string); ok {
-				if fraction, ok := node["remainingFraction"].(float64); ok {
-					info := bucketInfo{fraction: fraction}
-					if reset, ok := node["resetTime"].(string); ok {
-						info.reset = reset
-					}
-					out[window] = info
-				}
-			}
-			for _, child := range node {
-				walk(child)
-			}
-		case []any:
-			for _, child := range node {
-				walk(child)
-			}
+	for _, group := range decoded.Groups {
+		for _, bucket := range group.Buckets {
+			out[bucket.Window] = bucketInfo{fraction: bucket.RemainingFraction, reset: bucket.ResetTime}
 		}
 	}
-	walk(decoded)
 	return out
 }
 
-// collectSummary scans a quota response for the numeric account summary by key.
+// collectSummary reads the standard numeric account summary by key.
 func collectSummary(body []byte) map[string]float64 {
-	var decoded any
+	var decoded pluginapi.QuotaFetchResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil
 	}
 	out := map[string]float64{}
-	var walk func(v any)
-	walk = func(v any) {
-		switch node := v.(type) {
-		case map[string]any:
-			if key, ok := node["key"].(string); ok {
-				if value, ok := node["value"].(float64); ok {
-					out[key] = value
-				}
-			}
-			for _, child := range node {
-				walk(child)
-			}
-		case []any:
-			for _, child := range node {
-				walk(child)
-			}
-		}
+	for _, metric := range decoded.Summary {
+		out[metric.Key] = metric.Value
 	}
-	walk(decoded)
 	return out
 }
 
