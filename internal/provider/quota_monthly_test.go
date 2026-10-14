@@ -117,9 +117,18 @@ func TestMonthlyBucketIllegalGrantIsNotMaskedByBaseline(t *testing.T) {
 	// the static baseline as a normal-looking month.
 	negative := creditsPayload(t, `{"credits":{"monthlyCredits":50,"monthlyCreditsGranted":-5}}`)
 	assertMonthly(t, negative, factsFor(t, `{"data":{"planId":"individual-goat"}}`), false, 0)
-	// A grant typed as a non-number fails the whole payload closed.
-	if _, err := normalizeCredits([]byte(`{"credits":{"monthlyCredits":50,"monthlyCreditsGranted":"lots"}}`)); err == nil {
-		t.Fatalf("a non-numeric grant must fail closed")
+	// A grant of a non-number type is isolated from the trustworthy balances:
+	// the payload still parses and the monthly balance survives, but no monthly
+	// bucket is faked from the illegal grant (nor masked by the baseline).
+	response, err := normalizeCredits([]byte(`{"credits":{"monthlyCredits":50,"monthlyCreditsGranted":"lots"}}`))
+	if err != nil {
+		t.Fatalf("an illegal grant must not reject the trustworthy balances: %v", err)
+	}
+	if len(response.Summary) != 1 || response.Summary[0].Key != "monthly_credits" {
+		t.Fatalf("the trusted monthly balance must survive: %+v", response.Summary)
+	}
+	if len(response.Groups) != 0 {
+		t.Fatalf("an illegal grant must not become a normal monthly meter: %+v", response.Groups)
 	}
 }
 

@@ -42,9 +42,13 @@ type wireRequest struct {
 }
 
 // mockDirective overrides the next matching response to force a failure, a
-// truncated stream or a custom payload without any plugin-internal hook.
+// truncated stream or a custom payload without any plugin-internal hook. A
+// directive matches the request body by default; a non-empty path matches the
+// request path instead, which is required for body-less GETs such as the
+// read-only billing probes.
 type mockDirective struct {
 	match       string
+	path        string
 	status      int
 	contentType string
 	body        []byte
@@ -209,13 +213,30 @@ func (m *wireServer) truncateNext(match string) {
 	m.directives = append(m.directives, &mockDirective{match: match, truncate: true})
 }
 
-// takeDirective consumes the first directive matching the request body.
-func (m *wireServer) takeDirective(body []byte) *mockDirective {
+// respondPath makes the next request to the given path return a custom JSON
+// response. It is the path-matched counterpart of respondNext for body-less
+// GETs.
+func (m *wireServer) respondPath(path, body string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	text := string(body)
+	m.directives = append(m.directives, &mockDirective{path: path, status: http.StatusOK, contentType: "application/json", body: []byte(body)})
+}
+
+// takeDirective consumes the first directive matching the request: by path when
+// a path is set, otherwise by request-body substring.
+func (m *wireServer) takeDirective(req *wireRequest) *mockDirective {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	text := string(req.Body)
 	for _, d := range m.directives {
-		if d.consumed || !strings.Contains(text, d.match) {
+		if d.consumed {
+			continue
+		}
+		if d.path != "" {
+			if d.path != req.Path {
+				continue
+			}
+		} else if !strings.Contains(text, d.match) {
 			continue
 		}
 		d.consumed = true
@@ -225,7 +246,7 @@ func (m *wireServer) takeDirective(body []byte) *mockDirective {
 }
 
 func (m *wireServer) route(req *wireRequest) wireResponse {
-	if d := m.takeDirective(req.Body); d != nil {
+	if d := m.takeDirective(req); d != nil {
 		if d.truncate {
 			return truncatedResponse(req)
 		}

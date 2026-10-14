@@ -63,16 +63,19 @@ type accountWindow struct {
 	ResetAt *int64   `json:"resetAt"` // Unix milliseconds
 }
 
-// creditsShape is the /alpha/billing/credits payload.
+// creditsShape is the /alpha/billing/credits payload. MonthlyCreditsGranted is a
+// raw optional field so a wrong type in it cannot fail the decode of the core
+// balances or the window limits; it is validated in isolation by the monthly
+// meter.
 type creditsShape struct {
 	Credits *struct {
 		MonthlyCredits *float64 `json:"monthlyCredits"`
 		// MonthlyCreditsGranted is an optional per-period grant. When present it
 		// is authoritative for the monthly total; it is absent, not zero, when
 		// the upstream does not report one.
-		MonthlyCreditsGranted *float64 `json:"monthlyCreditsGranted"`
-		PurchasedCredits      *float64 `json:"purchasedCredits"`
-		FreeCredits           *float64 `json:"freeCredits"`
+		MonthlyCreditsGranted json.RawMessage `json:"monthlyCreditsGranted"`
+		PurchasedCredits      *float64        `json:"purchasedCredits"`
+		FreeCredits           *float64        `json:"freeCredits"`
 	} `json:"credits"`
 	WindowLimits *struct {
 		FiveHour *accountWindow `json:"fiveHour"`
@@ -80,13 +83,17 @@ type creditsShape struct {
 	} `json:"windowLimits"`
 }
 
-// subscriptionsShape is the /alpha/billing/subscriptions payload.
+// subscriptionsShape is the /alpha/billing/subscriptions payload. The optional
+// quantity/cancelAt/pendingPhase fields are kept raw so a wrong type in any of
+// them cannot fail the decode of the core plan/status/period fields.
 type subscriptionsShape struct {
 	Data *struct {
-		PlanID           string   `json:"planId"`
-		Status           string   `json:"status"`
-		Quantity         *float64 `json:"quantity"`
-		CurrentPeriodEnd string   `json:"currentPeriodEnd"`
+		PlanID           string          `json:"planId"`
+		Status           string          `json:"status"`
+		Quantity         json.RawMessage `json:"quantity"`
+		CurrentPeriodEnd string          `json:"currentPeriodEnd"`
+		CancelAt         json.RawMessage `json:"cancelAt"`
+		PendingPhase     json.RawMessage `json:"pendingPhase"`
 	} `json:"data"`
 }
 
@@ -97,7 +104,9 @@ type subscriptionFacts struct {
 	PlanID           string // normalized for exact baseline matching
 	Status           string // lowercased
 	Quantity         *float64
+	QuantityIllegal  bool // quantity was present but not a usable number
 	CurrentPeriodEnd string
+	Transition       bool // an explicit cancelAt/pendingPhase suppresses the reset
 }
 
 // fetchQuota performs read-only account reads for the selected credential only.
@@ -244,18 +253,27 @@ func buildQuotaResponse(payload creditsShape, facts *subscriptionFacts) (plugina
 
 // parseSubscriptionFacts extracts the monthly-relevant subscription fields. A
 // missing or malformed data block yields nil so no baseline or reset is
-// invented from partial data.
+// invented from partial data. The optional quantity and transition fields are
+// decoded in isolation: a wrong type there must not erase the plan, status or
+// period facts.
 func parseSubscriptionFacts(body []byte) *subscriptionFacts {
 	var payload subscriptionsShape
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Data == nil {
 		return nil
 	}
-	return &subscriptionFacts{
+	facts := &subscriptionFacts{
 		PlanID:           normalizePlanID(payload.Data.PlanID),
 		Status:           strings.ToLower(strings.TrimSpace(payload.Data.Status)),
-		Quantity:         payload.Data.Quantity,
 		CurrentPeriodEnd: payload.Data.CurrentPeriodEnd,
+		Transition:       transitionMarker(payload.Data.CancelAt) || transitionMarker(payload.Data.PendingPhase),
 	}
+	quantity := decodeOptionalNumber(payload.Data.Quantity)
+	if quantity.ok {
+		value := quantity.value
+		facts.Quantity = &value
+	}
+	facts.QuantityIllegal = quantity.illegal
+	return facts
 }
 
 // monthlyBucket derives the monthly meter from a reliable per-period grant or
@@ -280,23 +298,23 @@ func monthlyBucket(payload creditsShape, facts *subscriptionFacts) (pluginapi.Qu
 		return pluginapi.QuotaBucket{}, false
 	}
 
-	granted := payload.Credits.MonthlyCreditsGranted
-	if granted != nil && !finiteNonNegative(*granted) {
+	grant := decodeOptionalNumber(payload.Credits.MonthlyCreditsGranted)
+	if grant.illegal {
 		// An explicit but illegal grant is corrupt state: never mask it with the
 		// static baseline as a normal-looking monthly meter.
 		return pluginapi.QuotaBucket{}, false
 	}
 	base, planKnown := officialPlanBase(facts)
-	useGrant := granted != nil && *granted > 0
+	useGrant := grant.ok && grant.value > 0
 
 	var total float64
 	source := ""
 	switch {
-	case useGrant && planKnown && base > *granted:
+	case useGrant && planKnown && base > grant.value:
 		total = base
 		source = planBaselineSource
 	case useGrant:
-		total = *granted
+		total = grant.value
 		source = apiGrantSource
 	case planKnown:
 		total = base
@@ -309,6 +327,11 @@ func monthlyBucket(payload creditsShape, facts *subscriptionFacts) (pluginapi.Qu
 	// takes precedence over seat math, matching the official meter.
 	detail := ""
 	if !useGrant && planKnown && facts.PlanID == planTeamsPro {
+		if facts.QuantityIllegal {
+			// An explicitly illegal seat count is not a missing one: it must not
+			// silently default to a single seat.
+			return pluginapi.QuotaBucket{}, false
+		}
 		seats, ok := effectiveSeats(facts.Quantity)
 		if !ok {
 			return pluginapi.QuotaBucket{}, false
@@ -364,12 +387,13 @@ func formatSeats(seats float64) string {
 	return strconv.FormatFloat(seats, 'f', 0, 64)
 }
 
-// validPeriodReset renders the billing period end only when it is a real date.
-// It accepts RFC3339 (with optional fractional seconds) or the official
-// YYYY-MM-DD form interpreted as UTC midnight; anything else omits the reset
-// rather than guessing a fixed calendar month.
+// validPeriodReset renders the billing period end only when it is a real date
+// and no cancellation or pending plan phase is present. It accepts RFC3339 (with
+// optional fractional seconds) or the official YYYY-MM-DD form interpreted as UTC
+// midnight; anything else omits the reset rather than guessing a fixed calendar
+// month.
 func validPeriodReset(facts *subscriptionFacts) (string, bool) {
-	if facts == nil {
+	if facts == nil || facts.Transition {
 		return "", false
 	}
 	raw := strings.TrimSpace(facts.CurrentPeriodEnd)
@@ -440,6 +464,46 @@ func validateCreditComponents(monthly, purchased, free *float64) error {
 		}
 	}
 	return nil
+}
+
+// optionalNumber is the tri-state of an optional wire number decoded in
+// isolation from the core fields: absent (missing or null), a usable value, or
+// present-but-illegal. An illegal value must never be treated as absent, or it
+// would silently fall back to a default that the upstream did not ask for.
+type optionalNumber struct {
+	value   float64
+	ok      bool // usable: finite and non-negative
+	illegal bool // present but not a usable number
+}
+
+// decodeOptionalNumber isolates one optional numeric wire field so a wrong type
+// in it cannot fail the surrounding payload. A field that is absent or JSON null
+// is treated as missing; anything that is not a finite, non-negative number is
+// reported illegal.
+func decodeOptionalNumber(raw json.RawMessage) optionalNumber {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return optionalNumber{}
+	}
+	var value float64
+	if err := json.Unmarshal([]byte(text), &value); err != nil {
+		return optionalNumber{illegal: true}
+	}
+	if !finiteNonNegative(value) {
+		return optionalNumber{illegal: true}
+	}
+	return optionalNumber{value: value, ok: true}
+}
+
+// transitionMarker reports whether an optional subscription transition field
+// (cancelAt or pendingPhase) is present with a real marker. The public meter
+// computes hasPeriod && !cancelAt && !pendingPhase, so a present non-empty value
+// suppresses the promised reset. An absent, null or empty-string field is not a
+// transition; any other anomaly is conservatively treated as one (the date is
+// omitted, never fabricated).
+func transitionMarker(raw json.RawMessage) bool {
+	text := strings.TrimSpace(string(raw))
+	return text != "" && text != "null" && text != `""`
 }
 
 // finiteNonNegative reports a usable quota number: a real, non-negative value.
