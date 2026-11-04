@@ -4,208 +4,515 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>CommandCode Provider · 密钥与配额管理</title>
+<title>CommandCode Provider · 密钥管理</title>
 <link rel="stylesheet" href="./ui.css">
 </head>
 <body>
-<a class="skip-link" href="#main">跳到主要内容</a>
-<header class="page-header">
-  <h1>CommandCode Provider</h1>
-  <p class="subtitle">CLIProxyAPI 插件 <code>cliproxyapi-commandcode-provider</code>，上游 CommandCode CLI / Provider</p>
-</header>
-<main id="main">
-  <p id="insecure-warning" class="alert alert-error" role="alert" hidden>当前页面既非 HTTPS，也不是本机地址，出于安全考虑已禁用全部密钥操作。请改用 HTTPS，或在本机（localhost / 127.0.0.1 / [::1]）打开本页面。</p>
-
-  <section class="card" aria-labelledby="auth-heading">
-    <h2 id="auth-heading">1. 管理认证</h2>
-    <p class="hint">输入 CPA 管理密钥（management key）。该密钥仅保留在当前页面的输入框中，不会写入浏览器存储、Cookie 或 URL，也不会被记录或回显。</p>
-    <form id="auth-form" autocomplete="off">
-      <div class="field">
-        <label for="mgmt-key">CPA 管理密钥</label>
-        <input id="mgmt-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="mgmt-key-hint">
-        <p id="mgmt-key-hint" class="hint">远程访问需在 CPA 中启用远程管理（remote management）；密钥错误多次可能导致当前 IP 被临时封禁，本页面不会自动重试认证。</p>
+<a class="skip-link" href="#workspace">跳到主要内容</a>
+<noscript><p class="noscript">此管理页面需要启用 JavaScript。只有验证成功且勾选记住登录的 CPA 管理密钥可被记住；上游密钥不会保存在浏览器中。</p></noscript>
+<div id="workspace" class="workspace">
+  <section id="login-view" class="auth-view" aria-labelledby="login-heading" hidden>
+    <div class="auth-card">
+      <div class="auth-eyebrow">
+        <span class="auth-mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+        </span>
+        <span>CLIProxyAPI 插件</span>
       </div>
-      <div class="actions">
-        <button type="submit" id="refresh-btn" class="btn btn-primary">连接并刷新</button>
+      <h1 id="login-heading">登录 CommandCode Provider</h1>
+      <p class="auth-subtitle">输入 CPA 管理密钥，登录后管理上游密钥与模型。</p>
+      <p id="insecure-warning" class="alert alert-error" role="alert" hidden>当前页面既非 HTTPS，也不是本机地址，出于安全考虑已禁用登录和全部密钥操作。请改用 HTTPS，或在本机（localhost / 127.0.0.1 / [::1]）打开本页面。</p>
+      <p id="login-error" class="alert alert-error" role="alert" hidden></p>
+      <p id="login-warning" class="alert alert-warning" role="status" hidden></p>
+      <form id="auth-form" autocomplete="off" novalidate>
+        <div class="field">
+          <label for="mgmt-key">CPA 管理密钥</label>
+          <div class="password-control">
+            <input id="mgmt-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="mgmt-key-hint">
+            <button id="toggle-key-visibility" class="icon-button password-toggle" type="button" aria-label="显示密钥" aria-pressed="false" title="显示密钥">
+              <svg class="icon icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+              <svg class="icon icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 6.2A10.9 10.9 0 0 1 12 6c6 0 9.5 6 9.5 6a15.7 15.7 0 0 1-2.3 3.1"></path><path d="M6.1 7.7A16.6 16.6 0 0 0 2.5 12s3.5 6 9.5 6a10 10 0 0 0 4-.8"></path><path d="m4 4 16 16"></path><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"></path></svg>
+            </button>
+          </div>
+          <p id="mgmt-key-hint" class="hint">远程访问需在 CPA 中启用远程管理；密钥只随请求头发送，不写入 URL、日志或页面文本。</p>
+        </div>
+        <label class="checkbox-row" for="remember-login">
+          <input id="remember-login" type="checkbox" checked>
+          <span>记住登录（仅限可信设备）</span>
+        </label>
+        <p class="hint login-remember-hint">勾选后，管理密钥将保存在此浏览器；不勾选仅在当前会话有效。</p>
+        <button id="login-submit" type="submit" class="btn btn-primary btn-block">登录</button>
+      </form>
+      <div class="auth-safety">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"></path><path d="m9 12 2 2 4-4"></path></svg>
+        <div>
+          <p>上游 API key 不会保存在浏览器中。</p>
+          <p class="auth-safety-note">管理密钥只在验证成功后按所选方式保存，可随时退出登录清除。</p>
+        </div>
       </div>
-    </form>
+      <div class="login-theme-row">
+        <label for="login-theme">外观</label>
+        <select id="login-theme" aria-label="外观">
+          <option value="auto">跟随系统</option>
+          <option value="light">暖灰</option>
+          <option value="white">纯白</option>
+          <option value="dark">深色</option>
+        </select>
+      </div>
+    </div>
   </section>
 
-  <section class="card" aria-labelledby="import-heading">
-    <h2 id="import-heading">2. 导入 CommandCode 密钥</h2>
-    <p class="hint">每行一个 CommandCode 密钥。首尾空白会被去除，重复项会被忽略；最多 100 行，每行不超过 4096 字符，单次请求体不超过 64 KiB。请勿在此粘贴 CPA 管理密钥或下游 API key。</p>
-    <form id="import-form" autocomplete="off">
+  <section id="restoring-view" class="auth-view" aria-labelledby="restoring-heading" hidden>
+    <div class="auth-card restoring-card">
+      <span id="restore-spinner" class="spinner" aria-hidden="true"></span>
+      <h1 id="restoring-heading" class="restoring-heading">正在验证管理会话…</h1>
+      <p id="restore-status" class="hint" role="status" aria-live="polite">正在验证已保存的登录，请稍候。</p>
+      <div id="restore-error" class="alert alert-error" role="alert" hidden></div>
+      <div id="restore-actions" class="actions" hidden>
+        <button id="restore-retry" type="button" class="btn btn-secondary">重试</button>
+        <button id="restore-forget" type="button" class="btn btn-danger-outline">清除并重新登录</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">CC</span>
+        <div class="brand-copy">
+          <p class="brand-name">CommandCode Provider</p>
+          <p class="brand-support"><code>cliproxyapi-commandcode-provider</code> · CLIProxyAPI 插件</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <label class="theme-label" for="theme-select">外观</label>
+        <select id="theme-select" class="theme-select" aria-label="外观">
+          <option value="auto">跟随系统</option>
+          <option value="light">暖灰</option>
+          <option value="white">纯白</option>
+          <option value="dark">深色</option>
+        </select>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="页面标签">
+      <button type="button" class="tab is-active" data-tab="keys" aria-current="page">密钥管理</button>
+      <button type="button" class="tab" data-tab="models">手动模型</button>
+      <button type="button" class="tab" data-tab="settings">设置</button>
+    </nav>
+
+    <main id="main-content" class="content">
+      <div class="content-inner">
+        <div id="storage-warning-app" class="alert alert-warning app-alert" role="status" hidden></div>
+
+        <section id="page-keys" class="page" aria-labelledby="keys-heading">
+          <div class="page-head">
+            <div class="page-head-copy">
+              <h1 id="keys-heading">密钥管理</h1>
+              <p class="page-subtitle">管理 CommandCode 密钥，按需查询配额。</p>
+            </div>
+            <div class="page-actions">
+              <button id="reload-btn" type="button" class="btn btn-secondary">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.6"></path><path d="M20 4v7h-7"></path></svg>
+                刷新
+              </button>
+              <button id="keys-import" type="button" class="btn btn-primary">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+                导入密钥
+              </button>
+            </div>
+          </div>
+
+          <p id="status" class="status" role="status" aria-live="polite">尚未加载。</p>
+
+          <div class="stat-grid" aria-label="凭据概览">
+            <article class="stat-card">
+              <p class="stat-label">已托管密钥</p>
+              <p id="stat-total" class="stat-value">0</p>
+            </article>
+            <article class="stat-card">
+              <p class="stat-label"><span class="dot dot-success" aria-hidden="true"></span>可用</p>
+              <p id="stat-available" class="stat-value">0</p>
+            </article>
+            <article class="stat-card">
+              <p class="stat-label"><span class="dot dot-danger" aria-hidden="true"></span>不可用</p>
+              <p id="stat-unavailable" class="stat-value">0</p>
+            </article>
+            <article class="stat-card">
+              <p class="stat-label"><span class="dot dot-muted" aria-hidden="true"></span>已禁用</p>
+              <p id="stat-disabled" class="stat-value">0</p>
+            </article>
+          </div>
+
+          <div class="filter-bar">
+            <div class="search-control">
+              <svg class="icon search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+              <label class="visually-hidden" for="keys-search">搜索标签或凭据名称</label>
+              <input id="keys-search" class="search-input" type="search" autocomplete="off" placeholder="搜索标签或凭据名称">
+            </div>
+            <span class="filter-select">
+              <label class="visually-hidden" for="keys-status-filter">状态筛选</label>
+              <select id="keys-status-filter" aria-label="状态筛选">
+                <option value="all">全部状态</option>
+                <option value="ok">正常</option>
+                <option value="error">错误</option>
+                <option value="disabled">已禁用</option>
+              </select>
+            </span>
+            <span class="filter-select">
+              <label class="visually-hidden" for="keys-mode-filter">模式筛选</label>
+              <select id="keys-mode-filter" aria-label="模式筛选">
+                <option value="all">全部模式</option>
+                <option value="cli">CLI</option>
+                <option value="provider">Provider</option>
+                <option value="error">模式异常</option>
+              </select>
+            </span>
+            <p class="filter-meta"><span id="keys-count">0 条凭据</span><span aria-hidden="true">·</span><span id="keys-updated">尚未更新</span></p>
+          </div>
+
+          <div id="table-wrap" class="table-wrap">
+            <table class="keys-table" aria-label="已托管密钥">
+              <caption class="visually-hidden">已托管密钥列表，仅显示凭据元数据</caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="col-credential">凭据</th>
+                  <th scope="col" class="col-mode">模式</th>
+                  <th scope="col" class="col-status">状态</th>
+                  <th scope="col" class="col-availability">可用性</th>
+                  <th scope="col" class="col-counts">成功 / 失败</th>
+                  <th scope="col" class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="files-body">
+                <tr><td colspan="6" class="empty-cell">正在加载…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div id="keys-empty" class="empty-state" hidden>
+            <span class="empty-icon" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24"><circle cx="8" cy="15" r="3.5"></circle><path d="m10.5 12.5 8-8M16 7l2 2M13.5 9.5l2 2"></path></svg>
+            </span>
+            <h2>还没有托管密钥</h2>
+            <p>导入上游密钥后，在这里查看凭据状态、模式与按需配额。页面只显示凭据元数据。</p>
+            <button id="keys-empty-import" type="button" class="btn btn-primary">导入密钥</button>
+          </div>
+
+          <p class="page-footnote">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>
+            <span>仅显示凭据元数据，不回显上游密钥。配额按需查询，不自动轮询。</span>
+            <span class="scroll-hint">表格可左右滑动查看</span>
+          </p>
+        </section>
+
+        <section id="page-models" class="page" aria-labelledby="models-heading" hidden>
+          <div class="page-head">
+            <div class="page-head-copy">
+              <h1 id="models-heading">手动模型</h1>
+              <p class="page-subtitle">手动模型会与上游目录合并；手动注册不保证上游实际支持或额度充足。</p>
+            </div>
+            <span id="models-dirty-badge" class="dirty-badge" hidden>
+              <span class="dot dot-warning" aria-hidden="true"></span>
+              有未保存的修改
+            </span>
+          </div>
+
+          <section class="card model-form-card" aria-labelledby="model-form-heading">
+            <div class="card-head">
+              <div>
+                <h2 id="model-form-heading" class="card-title">添加模型</h2>
+                <p class="card-description">先添加到草稿，确认后再显式保存。</p>
+              </div>
+              <button id="manual-model-reload" type="button" class="btn btn-ghost btn-sm">重新加载</button>
+            </div>
+            <div class="model-form">
+              <div class="field">
+                <label for="manual-model-id">模型 ID</label>
+                <input id="manual-model-id" type="text" autocomplete="off" spellcheck="false" placeholder="custom-model-id">
+              </div>
+              <div class="field">
+                <label for="manual-model-protocol">上游协议</label>
+                <select id="manual-model-protocol" aria-label="上游协议">
+                  <option value="">自动 / 缺省（CLI Wire）</option>
+                  <option value="openai">OpenAI Chat Completions</option>
+                  <option value="claude">Anthropic Messages</option>
+                  <option value="openai-response">OpenAI Responses</option>
+                </select>
+              </div>
+              <div class="model-form-action">
+                <button id="manual-model-add" type="button" class="btn btn-secondary">添加到草稿</button>
+              </div>
+            </div>
+          </section>
+
+          <div class="table-wrap">
+            <table class="manual-model-table" aria-label="手动模型草稿">
+              <caption class="visually-hidden">手动模型草稿列表</caption>
+              <thead><tr><th scope="col">模型 ID</th><th scope="col">上游协议</th><th scope="col" class="col-actions">操作</th></tr></thead>
+              <tbody id="manual-model-body"><tr><td colspan="3" class="empty-cell">连接后加载。</td></tr></tbody>
+            </table>
+          </div>
+
+          <p class="page-footnote">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>
+            <span>最多 100 个唯一 ID，每个不超过 200 UTF-8 字节。删除只修改草稿；点击保存才写入 CPA 配置。</span>
+            <span class="scroll-hint">表格可左右滑动查看</span>
+          </p>
+
+          <div class="draft-actions">
+            <p id="manual-model-status" class="draft-status" role="status" aria-live="polite">连接后加载。</p>
+            <div class="page-actions">
+              <button id="manual-model-discard" type="button" class="btn btn-secondary" disabled>放弃修改</button>
+              <button id="manual-model-save" type="button" class="btn btn-primary" disabled>保存手动模型</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="page-settings" class="page" aria-labelledby="settings-heading" hidden>
+          <div class="page-head">
+            <div class="page-head-copy">
+              <h1 id="settings-heading">设置</h1>
+              <p class="page-subtitle">查看运行说明、管理登录会话与独立外观。</p>
+            </div>
+          </div>
+
+          <div class="settings-stack">
+            <section class="card" aria-labelledby="runtime-heading">
+              <div class="card-head">
+                <div>
+                  <h2 id="runtime-heading" class="card-title">运行状态</h2>
+                  <p class="card-description">CommandCode 插件只读运行信息。行级模式仍在密钥管理中单独保存。</p>
+                </div>
+                <span class="readonly-badge">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+                  只读
+                </span>
+              </div>
+              <p id="settings-status" class="status" role="status" aria-live="polite">进入本页后加载。</p>
+              <dl class="readonly-grid">
+                <div class="readonly-item">
+                  <dt class="readonly-label">旧凭据默认模式</dt>
+                  <dd id="setting-mode" class="readonly-value">—</dd>
+                </div>
+                <div class="readonly-item">
+                  <dt class="readonly-label">CLI 兼容版本</dt>
+                  <dd id="setting-cli-version" class="readonly-value mono">—</dd>
+                </div>
+                <div class="readonly-item">
+                  <dt class="readonly-label">基础地址</dt>
+                  <dd id="setting-base-url" class="readonly-value">—</dd>
+                </div>
+                <div class="readonly-item">
+                  <dt class="readonly-label">零数据保留 (ZDR)</dt>
+                  <dd id="setting-zdr" class="readonly-value">—</dd>
+                </div>
+                <div class="readonly-item">
+                  <dt class="readonly-label">模型目录快照</dt>
+                  <dd id="setting-catalog" class="readonly-value">—</dd>
+                </div>
+              </dl>
+              <p id="setting-stale" class="alert alert-warning" role="alert" hidden>警告：模型目录已过期（stale），系统保留最后一次可用配置。</p>
+              <p class="hint">这些值来自插件运行状态，仅可查看；旧凭据未单独配置模式时使用上述默认值，行级模式需在密钥管理中显式保存。</p>
+              <div class="page-actions">
+                <button id="settings-retry" type="button" class="btn btn-secondary">重新加载运行状态</button>
+              </div>
+            </section>
+
+            <div class="settings-grid">
+              <section class="card" aria-labelledby="run-notes-heading">
+                <div class="card-head">
+                  <div>
+                    <h2 id="run-notes-heading" class="card-title">运行说明</h2>
+                    <p class="card-description">插件不接管 CPA 的调度职责。</p>
+                  </div>
+                </div>
+                <ul class="notes-list">
+                  <li>凭据池化、故障转移与会话亲和由 CPA 负责；插件不实现密钥选择、冷却或健康检查调度。</li>
+                  <li>如需会话亲和，请在 CPA 配置中启用 <code>routing.session-affinity: true</code>。</li>
+                  <li>导入的密钥保存在 CPA 的 <code>auth-dir</code> 中；页面仅显示凭据元数据，不回显上游密钥。</li>
+                </ul>
+              </section>
+
+              <section class="card" aria-labelledby="session-heading">
+                <div class="card-head">
+                  <div>
+                    <h2 id="session-heading" class="card-title">管理会话</h2>
+                    <p class="card-description">管理密钥只在验证成功后保存，且不会与其它插件共享。</p>
+                  </div>
+                </div>
+                <div class="settings-copy">
+                  <p>勾选“记住登录”时，CPA 管理密钥仅保存在本插件按插件 ID 与反向代理前缀隔离的命名空间；不勾选则仅保存在当前标签页会话，存储不可用时退回内存。</p>
+                  <p>启动时仅验证一次。确认失效（401）后清除本插件凭据并返回登录；权限拒绝（403）说明远程管理或网络限制，不当作密钥无效；网络或 5xx 保留凭据并允许手动重试，不自动重复认证。</p>
+                  <p>仅 CPA 管理密钥可被记住。上游 API key 与客户端 API key 不会进入浏览器存储，也不读取 Observer 或宿主的凭据。</p>
+                </div>
+                <div class="page-actions">
+                  <button id="logout-btn" type="button" class="btn btn-danger-outline">退出登录</button>
+                </div>
+              </section>
+            </div>
+
+            <section class="card" aria-labelledby="appearance-heading">
+              <div class="card-head">
+                <div>
+                  <h2 id="appearance-heading" class="card-title">外观与嵌入</h2>
+                  <p class="card-description">与 Observer 的中性色 token 保持一致，不引入独立品牌外观。</p>
+                </div>
+              </div>
+              <div class="appearance-grid">
+                <div class="appearance-item">
+                  <h3>独立页面</h3>
+                  <p>可在“跟随系统 / 暖灰 / 纯白 / 深色”之间切换；当前选择只作用于本次打开，不写入浏览器存储。</p>
+                </div>
+                <div class="appearance-item">
+                  <h3>嵌入 CPA 管理中心</h3>
+                  <p>嵌入 iframe 时继承宿主主题，隐藏重复的品牌头部与主题控件，保留三页标签导航，并为宿主右上悬浮操作保留安全区域。</p>
+                </div>
+              </div>
+              <div class="embedded-callout">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>
+                <span>独立模式与嵌入模式由页面是否位于 iframe 决定，不是可编辑的插件配置项。</span>
+              </div>
+            </section>
+
+            <p class="links">
+              <a href="https://github.com/fengwk/cliproxyapi-commandcode-provider" target="_blank" rel="noopener noreferrer">项目仓库</a>
+            </p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div id="import-modal" class="modal-root" hidden>
+  <div class="modal-overlay" data-modal-overlay="import"></div>
+  <div class="modal-content modal-md" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <header class="modal-header">
+      <div>
+        <h2 id="import-title" class="modal-title">导入 CommandCode 密钥</h2>
+        <p class="modal-subtitle">仅粘贴上游密钥，不是 CPA 管理密钥或客户端 API key。</p>
+      </div>
+      <button id="import-close" type="button" class="icon-button modal-close" aria-label="关闭导入对话框">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+      </button>
+    </header>
+    <form id="import-form" class="modal-body" autocomplete="off" novalidate>
       <div class="field">
-        <label for="keys">CommandCode 密钥（每行一个）</label>
-        <textarea id="keys" rows="6" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="keys-hint"></textarea>
-        <p id="keys-hint" class="hint">密钥仅随本次导入请求发送；导入完全成功后输入框会被清空，失败或部分失败时会保留内容以便修改。</p>
+        <label for="keys">上游密钥（每行一个）</label>
+        <textarea id="keys" rows="5" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="keys-hint"></textarea>
+        <p id="keys-hint" class="hint">首尾空白会被去除，重复项会被忽略；密钥仅随本次导入请求发送。</p>
       </div>
       <div class="field">
         <label for="label">标签（可选）</label>
-        <input id="label" name="label" type="text" maxlength="128" autocomplete="off" spellcheck="false" aria-describedby="label-hint">
+        <input id="label" type="text" maxlength="128" autocomplete="off" spellcheck="false" aria-describedby="label-hint">
         <p id="label-hint" class="hint">用于在 CPA 中区分这批密钥，最长 128 个字符。</p>
       </div>
       <div class="field">
         <label for="import-mode">模式</label>
-        <select id="import-mode" name="mode" aria-describedby="import-mode-hint">
+        <select id="import-mode" aria-describedby="import-mode-hint">
           <option value="cli" selected>CLI 模式 (cli)</option>
           <option value="provider">Provider 模式 (provider)</option>
         </select>
-        <p id="import-mode-hint" class="hint">新导入凭据所使用的运行模式（默认 CLI 模式）；仅对本次导入的凭据生效，不影响既有凭据。</p>
+        <p id="import-mode-hint" class="hint">仅用于本次导入，不影响既有凭据；新凭据会显式保存该模式。</p>
       </div>
-      <div class="actions">
-        <button type="submit" id="import-btn" class="btn btn-primary">导入密钥</button>
-        <span id="import-progress" class="hint" hidden>正在提交…</span>
-      </div>
+      <p class="constraints">最多 100 行，单行 ≤ 4096 字符，单次请求体 ≤ 64 KiB。安全环境门与所有请求校验保持不变。</p>
+      <p id="import-status" class="status" role="status" aria-live="polite" hidden></p>
     </form>
-  </section>
+    <footer class="modal-footer">
+      <p class="modal-safety">上游密钥只用于本次提交，不保存在浏览器中。</p>
+      <div class="page-actions">
+        <button id="import-cancel" type="button" class="btn btn-secondary">取消</button>
+        <button id="import-btn" type="submit" form="import-form" class="btn btn-primary">导入密钥</button>
+        <span id="import-progress" class="inline-progress" hidden><span class="spinner spinner-sm" aria-hidden="true"></span>正在提交…</span>
+      </div>
+    </footer>
+  </div>
+</div>
 
-  <section class="card" aria-labelledby="list-heading">
-    <div class="section-head">
-      <h2 id="list-heading">3. 已托管的密钥</h2>
-      <button type="button" id="reload-btn" class="btn btn-secondary">刷新列表</button>
+<div id="quota-modal" class="modal-root" hidden>
+  <div class="modal-overlay" data-modal-overlay="quota"></div>
+  <div class="modal-content modal-lg" role="dialog" aria-modal="true" aria-labelledby="quota-title">
+    <header class="modal-header">
+      <div>
+        <h2 id="quota-title" class="modal-title">配额详情</h2>
+        <p id="quota-selection" class="modal-subtitle"></p>
+      </div>
+      <button id="quota-close" type="button" class="icon-button modal-close" aria-label="关闭配额对话框">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+      </button>
+    </header>
+    <div class="modal-body">
+      <div class="quota-toolbar">
+        <p id="quota-status" class="status" role="status" aria-live="polite">尚未选择密钥。</p>
+        <button id="quota-refresh" type="button" class="btn btn-secondary btn-sm">刷新配额</button>
+      </div>
+      <p class="quota-meta">按此凭据查询 · 不自动轮询<span id="quota-updated"></span></p>
+      <div id="quota-panel" hidden>
+        <div id="quota-summary" class="stat-grid">
+          <article class="stat-card">
+            <p class="stat-label">总计点数</p>
+            <p id="quota-credits-total" class="stat-value stat-value-sm">—</p>
+          </article>
+          <article class="stat-card">
+            <p class="stat-label">月度点数</p>
+            <p id="quota-credits-monthly" class="stat-value stat-value-sm">—</p>
+          </article>
+          <article class="stat-card">
+            <p class="stat-label">购买点数</p>
+            <p id="quota-credits-purchased" class="stat-value stat-value-sm">—</p>
+          </article>
+          <article class="stat-card">
+            <p class="stat-label">免费点数</p>
+            <p id="quota-credits-free" class="stat-value stat-value-sm">—</p>
+          </article>
+        </div>
+        <p class="hint">四项点数来自上游本次响应；本页不跨字段或跨凭据累加，额度窗口以下方为准。</p>
+        <div id="quota-table-wrap" class="table-wrap">
+          <table class="quota-table" aria-label="所选密钥的速率限制窗口">
+            <caption class="visually-hidden">所选密钥的速率限制窗口</caption>
+            <thead>
+              <tr>
+                <th scope="col">窗口</th>
+                <th scope="col">剩余</th>
+                <th scope="col">已用</th>
+                <th scope="col">进度</th>
+                <th scope="col">UTC 重置</th>
+                <th scope="col">说明</th>
+              </tr>
+            </thead>
+            <tbody id="quota-body"></tbody>
+          </table>
+        </div>
+        <p id="quota-no-buckets" class="hint" hidden>当前账号暂无活动速率限制窗口；缺失窗口不会显示为 0。</p>
+        <p class="hint">同一订阅下的多个密钥可能共享配额；此处仅展示当前凭据的查询结果，不跨凭据汇总。</p>
+      </div>
     </div>
-    <p id="summary" class="hint">尚未加载。</p>
-    <p id="status" class="status" role="status" aria-live="polite">尚未加载。请输入 CPA 管理密钥并点击“连接并刷新”。</p>
-    <div class="table-wrap is-empty" id="table-wrap">
-      <table>
-        <caption class="visually-hidden">已托管密钥列表（仅显示非密信息）</caption>
-        <thead>
-          <tr>
-            <th scope="col">名称</th>
-            <th scope="col">标签</th>
-            <th scope="col">模式</th>
-            <th scope="col">状态</th>
-            <th scope="col">禁用</th>
-            <th scope="col">可用性</th>
-            <th scope="col">成功</th>
-            <th scope="col">失败</th>
-            <th scope="col">操作</th>
-          </tr>
-        </thead>
-        <tbody id="files-body">
-          <tr><td colspan="9" class="empty-cell">暂无数据。</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="hint">删除仅移除所选的 CommandCode 凭据文件；保存或删除后不会自动轮询，请手动刷新列表以查看最新状态。</p>
-  </section>
+    <footer class="modal-footer">
+      <p class="modal-safety">配额查询为只读操作，不重置或消耗额度。</p>
+      <button id="quota-close-footer" type="button" class="btn btn-secondary">关闭</button>
+    </footer>
+  </div>
+</div>
 
-  <section class="card" aria-labelledby="quota-heading">
-    <h2 id="quota-heading">4. 配额查看</h2>
-    <p class="hint">配额查询为只读操作，不会重置或消耗任何配额。同一订阅下的多个密钥可能共享配额，因此不同密钥查询到的结果可能相同。</p>
-    <p id="quota-status" class="status info" role="status" aria-live="polite">尚未选择密钥。请在“已托管的密钥”列表中点击某个密钥的“查看配额”。</p>
-    <div id="quota-panel" hidden>
-      <p id="quota-selection" class="hint"></p>
-      <div id="quota-summary" class="quota-summary" hidden>
-        <div class="summary-card">
-          <div class="summary-card-label">总计点数</div>
-          <div id="quota-credits-total" class="summary-card-value">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-card-label">月度点数</div>
-          <div id="quota-credits-monthly" class="summary-card-value">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-card-label">购买点数</div>
-          <div id="quota-credits-purchased" class="summary-card-value">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-card-label">免费点数</div>
-          <div id="quota-credits-free" class="summary-card-value">—</div>
-        </div>
-      </div>
-      <div class="table-wrap" id="quota-table-wrap">
-        <table class="quota-table">
-          <caption class="visually-hidden">所选密钥的速率限制窗口</caption>
-          <thead>
-            <tr>
-              <th scope="col">窗口</th>
-              <th scope="col">剩余</th>
-              <th scope="col">已用</th>
-              <th scope="col">进度</th>
-              <th scope="col">重置时间</th>
-              <th scope="col">说明</th>
-            </tr>
-          </thead>
-          <tbody id="quota-body"></tbody>
-        </table>
-      </div>
-      <p id="quota-no-buckets" class="hint" hidden>当前账号暂无活动速率限制窗口。</p>
+<div id="dirty-modal" class="modal-root" hidden>
+  <div class="modal-overlay" data-modal-overlay="dirty"></div>
+  <div class="modal-content modal-sm" role="dialog" aria-modal="true" aria-labelledby="dirty-title">
+    <header class="modal-header">
+      <h2 id="dirty-title" class="modal-title">放弃未保存的修改？</h2>
+    </header>
+    <div class="modal-body">
+      <p>当前手动模型的修改尚未保存。离开后，这些修改将丢失。</p>
     </div>
-  </section>
+    <footer class="modal-footer">
+      <div class="page-actions">
+        <button id="dirty-continue" type="button" class="btn btn-secondary">继续编辑</button>
+        <button id="dirty-discard" type="button" class="btn btn-danger">放弃修改</button>
+      </div>
+    </footer>
+  </div>
+</div>
 
-  <section class="card" aria-labelledby="settings-heading">
-    <h2 id="settings-heading">5. 运行状态与手动模型</h2>
-    <p class="hint">展示 CommandCode 运行时状态。每个凭据单独配置，下面是缺少mode旧凭据的默认值；可查看 CLI 兼容版本、基础地址、零数据保留 (ZDR) 与模型目录快照，并配置自定义手动模型。</p>
-    <div id="settings-grid" class="settings-grid">
-      <div class="settings-item">
-        <div class="settings-label">旧凭据默认模式</div>
-        <div id="setting-mode" class="settings-value">CLI 模式（默认）</div>
-      </div>
-      <div class="settings-item">
-        <div class="settings-label">CLI 兼容版本</div>
-        <div id="setting-cli-version" class="settings-value">1.79.2</div>
-      </div>
-      <div class="settings-item">
-        <div class="settings-label">基础地址</div>
-        <div id="setting-base-url" class="settings-value">默认</div>
-      </div>
-      <div class="settings-item">
-        <div class="settings-label">零数据保留 (ZDR)</div>
-        <div id="setting-zdr" class="settings-value">未开启</div>
-      </div>
-      <div class="settings-item">
-        <div class="settings-label">模型目录快照</div>
-        <div id="setting-catalog" class="settings-value">87 个模型</div>
-      </div>
-    </div>
-    <p id="setting-stale" class="alert alert-error" hidden>警告：模型目录已过期（stale），系统保留最后一次可用配置。</p>
-    <p class="risk-notice">安全与权限风险提示：CLI 模式下使用标准会话与权限体系；系统不进行自动密钥轮询或产生费用的连通性调用；API 密钥与管理密钥仅保留在当前会话的输入框与请求中，绝不写入浏览器持久存储。</p>
-    <div class="model-fields">
-      <div class="field">
-        <label for="manual-model-id">模型 ID</label>
-        <input id="manual-model-id" type="text" autocomplete="off" spellcheck="false" placeholder="custom-model-id">
-      </div>
-      <div class="field">
-        <label for="manual-model-protocol">上游协议</label>
-        <select id="manual-model-protocol">
-          <option value="">自动 / 缺省（CLI Wire）</option>
-          <option value="openai">OpenAI Chat Completions</option>
-          <option value="claude">Anthropic Messages</option>
-          <option value="openai-response">OpenAI Responses</option>
-        </select>
-      </div>
-      <button id="manual-model-add" type="button" class="btn btn-secondary">添加到草稿</button>
-    </div>
-    <div class="table-wrap">
-      <table class="manual-model-table">
-        <caption class="visually-hidden">手动注册模型草稿</caption>
-        <thead><tr><th scope="col">模型 ID</th><th scope="col">上游协议</th><th scope="col">操作</th></tr></thead>
-        <tbody id="manual-model-body"><tr><td colspan="3" class="empty-cell">连接后加载。</td></tr></tbody>
-      </table>
-    </div>
-    <p class="hint">最多 100 个唯一 ID，每个不超过 200 UTF-8 字节。删除只修改草稿；点击保存才写入 CPA 配置。清空并保存可取消全部手动注册。</p>
-    <div class="actions">
-      <button id="manual-model-save" type="button" class="btn btn-primary" disabled>保存手动模型</button>
-      <button id="manual-model-reload" type="button" class="btn btn-secondary">重新加载 / 放弃草稿</button>
-    </div>
-    <p id="manual-model-status" class="status info" role="status" aria-live="polite">连接后加载，或输入管理密钥再点击重新加载。</p>
-  </section>
-
-  <section class="card" aria-labelledby="about-heading">
-    <h2 id="about-heading">运行说明</h2>
-    <ul class="notes">
-      <li>凭据池化、故障转移与会话亲和由 CPA 负责；插件不实现密钥选择、冷却、重试或健康检查调度。</li>
-      <li>如需会话亲和，请在 CPA 配置中启用 <code>routing.session-affinity: true</code>。</li>
-      <li>密钥保存在 CPA 的 auth 目录（auth-dir）中，不保存在浏览器里。</li>
-      <li>请求头中的会话范围由 CPA 的会话身份与所选 auth 确定性地决定。</li>
-    </ul>
-    <p class="links">
-      <a href="https://github.com/fengwk/cliproxyapi-commandcode-provider" target="_blank" rel="noopener noreferrer">项目仓库</a>
-    </p>
-  </section>
-</main>
 <script src="./ui.js" defer></script>
 </body>
 </html>

@@ -67,7 +67,9 @@ func (r *Response) Completion() ([]byte, error)
 - summary是 credits API明确给出的monthly_credits/purchased_credits/free_credits和同账号这些组件的total_credits（单个账号内相加，不是key池求和）；unit=credits，format=number，不猜USD。monthly_credits是剩余量不是上限：不把它当分母，也不把旧额度/充值/免费余额混入月 cap。
 - subscriptions 上游提供 planID/status/quantity/currentPeriodEnd；CPA v8.0.23 的 QuotaSubscription 没有 Status/period/quantity 字段，因此只映射真实 planID，不把 active/past_due 等状态伪装为 TierName，也不向该字段伪造 allowance；status/quantity/period 只用于月度窗口计算与来源说明，月度总额来源限于前述授额和具名官网快照。quantity 及可选转变字段 cancelAt/pendingPhase 以 raw 隔离解析，类型异常不抹除 planID/status/currentPeriodEnd。官网 Web 走 /internal/billing/**，插件/CLI 走 /alpha/billing/**，公开静态形状不等于 /alpha 每账号必返回 monthlyCreditsGranted；本仓库未实测真实账号返回。
 
-UI 中文、无框架/CDN/浏览器持久密钥、纯文本截断+title、支持 proxy prefix。导入表单有 cli/provider 下拉，默认选 CLI，并显式传 mode；该选择只作用于本次导入，不表示所有凭据的模式。key 表有“模式”列、每行下拉和“保存模式”，经 auth_index PATCH。invalid/unavailable 显示错误，不伪装成 cli。PATCH 后重新 GET 确认；错误不清空列表或其他凭据。设置区只读项改称“旧凭据默认模式”，明确每凭据可覆盖；catalog 状态仍只读。配额与手动模型保留：手动模型走既有 CPA 保存路径，失败不清空输入。安全上下文门、管理密钥仅请求头、busy/认证失败提示、同源 CSP、无密钥持久化保持不变。不轮询、不直接调上游、不做收费连通性推理测试。
+UI 中文、无框架/CDN、纯文本截断+title、支持 proxy prefix；独立登录后分为密钥管理/手动模型/设置三页，导入与配额使用模态。导入表单有 cli/provider 下拉，默认选 CLI，并显式传 mode；只作用于本次导入，不表示所有凭据的模式。key 表保留行级模式与显式“保存模式”，经 auth_index PATCH 后重新 GET 确认；invalid/unavailable 不伪装 cli，错误保留列表与草稿。设置的旧凭据默认模式和 catalog 仍只读。手动模型沿用 validate→PATCH→有界回读双确认，失败保留草稿，未保存离开需确认。安全上下文门、管理密钥仅请求头、busy/固定错误文案和同源 CSP 不变。不轮询、不直接调上游、不做收费推理探测。
+
+v0.3 起用户明确授权“记住管理登录”：仅验证成功的 CPA 管理密钥可写入本插件按 plugin ID 与 proxy prefix 隔离的 localStorage（勾选）或 sessionStorage（未勾选且清旧持久凭据），存储不可用逐级退回内存并提示。上游与客户端 API key、模型草稿和数据列表仍禁止存入浏览器。启动只 GET /keys 校验一次并复用结果；401 清本插件两处存储/会话/页面数据回登录，403 与网络/5xx 保留已存凭据并允许手动重试，不自动重复认证。退出清除本插件登录，不读取宿主、Observer 或兄弟插件凭据；代际与 abort 防止迟到响应复活旧会话。内嵌时页签保留、隐藏重复品牌/主题，内容与模态避让 CPA 原生右上浮层。
 
 ## 4. 验证与发布
 

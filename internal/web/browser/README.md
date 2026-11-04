@@ -1,16 +1,29 @@
 # Browser verification
 
-Run the production assets and CSP against fake loopback management endpoints.
-Playwright is an external test tool, not a plugin dependency:
+Run the real production assets and exact CSP against synthetic loopback endpoints.
+Python Playwright is an external test tool, not a plugin runtime dependency:
 
 ```bash
-NODE_PATH=/path/to/external/node_modules CHROMIUM_PATH=/usr/bin/chromium \
-  node internal/web/browser/polish.cjs /tmp/commandcode-ui-evidence
+python3 internal/web/browser/session-layout.py --report-dir /tmp/commandcode-ui-evidence
 ```
 
-Checks cover light/white/dark at 1280/768/390px, compact 34/28px controls,
-44px coarse-pointer targets, real dropdown keyboard/pointer operation,
-label focus, parent-visible iframe positioning, repeated credential reload,
-mode PATCH followed by GET confirmation, failed-write draft preservation,
-inert labels, production CSP, and absence of credentials in URLs or storage.
-Screenshots and results go only to the supplied directory outside the repository.
+Checks cover independent login, exactly one remembered-session validation,
+successful import, explicit mode PATCH followed by GET confirmation, quota and
+logout. Warm/white/dark at 1440/768/390px check the floating-toolbar safety line,
+scroll clipping, modal controls and no page-level horizontal overflow.
+`ui.test.cjs` preserves failed-write draft, nullable quota, model and select
+regressions and loads `login.test.cjs` for namespace/fallback/clear checks.
+
+If Playwright is not already installed, keep its environment outside the repo:
+
+```bash
+uv venv /tmp/provider-ui-browser-env
+uv pip install --python /tmp/provider-ui-browser-env/bin/python playwright
+/tmp/provider-ui-browser-env/bin/python internal/web/browser/session-layout.py \
+  --report-dir /tmp/commandcode-ui-evidence
+```
+
+Chromium is expected at `/usr/bin/chromium`. No live CPA, real credential or
+production configuration is read. Screenshots/results go only to the supplied
+directory. The old `polish.cjs` describes the retired v0.2 single-page DOM and is
+not the current test entry.

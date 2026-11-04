@@ -4,9 +4,9 @@
  * CommandCode key and quota management UI for the cliproxyapi-commandcode-provider CPA plugin.
  *
  * Security invariants:
- * - The CPA management key lives only in the password input and in request headers.
+ * - Only verified, opt-in management login may be stored in this plugin/prefix namespace.
  * - Imported CommandCode keys live only in the textarea and in the in-flight request body.
- * - No secret is written to browser storage, Cookies, URLs, logs, tooltips, titles or toasts.
+ * - Upstream/client keys never enter browser storage; no secret enters Cookies, URLs or logs.
  * - All endpoints are derived relative to the current location so an upstream proxy prefix works.
  */
 
@@ -553,6 +553,8 @@ function buildManagementRequest(key, options) {
     method: typeof opts.method === "string" ? opts.method : "GET",
     credentials: "omit",
     cache: "no-store",
+    mode: "same-origin",
+    redirect: "error",
     headers: headers
   };
   if (typeof opts.body === "string") {
@@ -572,7 +574,7 @@ var THEME_TOKENS = [
   "--border-color", "--border-primary", "--border-hover",
   "--primary-color", "--primary-hover", "--primary-active", "--primary-contrast",
   "--success-color", "--warning-color", "--error-color", "--danger-color",
-  "--radius-md", "--radius-lg", "--shadow", "--shadow-lg"
+  "--radius-md", "--radius-lg", "--shadow", "--shadow-lg", "--header-height"
 ];
 
 function resolveAppliedTheme(parentTheme, systemPrefersDark) {
@@ -660,13 +662,28 @@ function initTheme() {
   var root = document.documentElement;
   var hostWindow = typeof window !== "undefined" ? window.parent : null;
   var hostTheme = readParentTheme(hostWindow);
+  var choice = "auto";
+  if (hostWindow && hostWindow !== window) root.setAttribute("data-embedded", "true");
 
   function reapply() {
     var observed = readParentTheme(hostWindow);
-    applyThemeToRoot(root, resolveAppliedTheme(observed, prefersDarkScheme()), observed === null ? null : hostWindow);
+    var applied = observed === null && choice !== "auto" ? choice : resolveAppliedTheme(observed, prefersDarkScheme());
+    applyThemeToRoot(root, applied, observed === null ? null : hostWindow);
   }
 
   reapply();
+
+  var themeSelect = document.getElementById("theme-select");
+  var loginTheme = document.getElementById("login-theme");
+  function onThemeChange(elem) {
+    if (!elem) return;
+    choice = ["auto", "light", "white", "dark"].indexOf(elem.value) >= 0 ? elem.value : "auto";
+    if (themeSelect && themeSelect !== elem) themeSelect.value = choice;
+    if (loginTheme && loginTheme !== elem) loginTheme.value = choice;
+    reapply();
+  }
+  if (themeSelect) themeSelect.addEventListener("change", function () { onThemeChange(themeSelect); });
+  if (loginTheme) loginTheme.addEventListener("change", function () { onThemeChange(loginTheme); });
 
   if (hostTheme !== null && typeof MutationObserver === "function") {
     try {
@@ -1246,7 +1263,8 @@ var api = {
   readParentTheme: readParentTheme,
   collectThemeTokens: collectThemeTokens,
   normalizeManualModels: normalizeManualModels,
-  createSelectController: createSelectController
+  createSelectController: createSelectController,
+  managementCredentials: managementCredentials
 };
 
 if (typeof module !== "undefined" && module.exports) {
@@ -1255,41 +1273,140 @@ if (typeof module !== "undefined" && module.exports) {
 
 /* ---------------------------------------------------------------- DOM wiring */
 
+// Only this plugin's verified management login may enter browser storage.
+function managementCredentials(win, namespace) {
+  function store(name) {
+    try { return win[name]; } catch (_) { return null; }
+  }
+  function remove(name) {
+    try { var target = store(name); if (target) target.removeItem(namespace); } catch (_) { /* unavailable */ }
+  }
+  return {
+    read: function () {
+      for (var i = 0; i < 2; i++) {
+        try {
+          var target = store(i === 0 ? "localStorage" : "sessionStorage");
+          var value = target && target.getItem(namespace);
+          if (typeof value === "string" && value) return { key: value, persistent: i === 0 };
+        } catch (_) { /* try the session store */ }
+      }
+      return null;
+    },
+    clear: function () { remove("localStorage"); remove("sessionStorage"); },
+    save: function (key, remember) {
+      remove("localStorage");
+      remove("sessionStorage");
+      if (remember) {
+        try {
+          var local = store("localStorage");
+          if (!local) throw new Error();
+          local.setItem(namespace, key);
+          return { mode: "已记住管理登录", warning: "" };
+        } catch (_) { /* fall back to session only */ }
+      }
+      try {
+        var session = store("sessionStorage");
+        if (!session) throw new Error();
+        session.setItem(namespace, key);
+        return {
+          mode: "仅当前标签页会话",
+          warning: remember ? "本地存储不可用，无法记住登录；仅在当前会话有效。" : ""
+        };
+      } catch (_) {
+        return { mode: "仅当前页面内存", warning: "浏览器存储不可用，管理登录仅在当前页面内存有效。" };
+      }
+    }
+  };
+}
+
 function initUi() {
   var doc = document;
+  function byId(id) { return doc.getElementById(id); }
+
   var el = {
-    mgmtKey: doc.getElementById("mgmt-key"),
-    authForm: doc.getElementById("auth-form"),
-    refreshBtn: doc.getElementById("refresh-btn"),
-    importForm: doc.getElementById("import-form"),
-    keys: doc.getElementById("keys"),
-    label: doc.getElementById("label"),
-    importMode: doc.getElementById("import-mode"),
-    importBtn: doc.getElementById("import-btn"),
-    importProgress: doc.getElementById("import-progress"),
-    reloadBtn: doc.getElementById("reload-btn"),
-    summary: doc.getElementById("summary"),
-    status: doc.getElementById("status"),
-    tableWrap: doc.getElementById("table-wrap"),
-    filesBody: doc.getElementById("files-body"),
-    insecureWarning: doc.getElementById("insecure-warning"),
-    quotaStatus: doc.getElementById("quota-status"),
-    quotaPanel: doc.getElementById("quota-panel"),
-    quotaSelection: doc.getElementById("quota-selection"),
-    quotaSummary: doc.getElementById("quota-summary"),
-    quotaCreditsTotal: doc.getElementById("quota-credits-total"),
-    quotaCreditsMonthly: doc.getElementById("quota-credits-monthly"),
-    quotaCreditsPurchased: doc.getElementById("quota-credits-purchased"),
-    quotaCreditsFree: doc.getElementById("quota-credits-free"),
-    quotaTableWrap: doc.getElementById("quota-table-wrap"),
-    quotaBody: doc.getElementById("quota-body"),
-    quotaNoBuckets: doc.getElementById("quota-no-buckets"),
-    settingMode: doc.getElementById("setting-mode"),
-    settingCliVersion: doc.getElementById("setting-cli-version"),
-    settingBaseUrl: doc.getElementById("setting-base-url"),
-    settingZdr: doc.getElementById("setting-zdr"),
-    settingCatalog: doc.getElementById("setting-catalog"),
-    settingStale: doc.getElementById("setting-stale")
+    workspace: byId("workspace"),
+    loginView: byId("login-view"),
+    restoringView: byId("restoring-view"),
+    appShell: byId("app-shell"),
+    mgmtKey: byId("mgmt-key"),
+    authForm: byId("auth-form"),
+    loginSubmit: byId("login-submit"),
+    toggleKeyVisibility: byId("toggle-key-visibility"),
+    rememberLogin: byId("remember-login"),
+    insecureWarning: byId("insecure-warning"),
+    loginError: byId("login-error"),
+    loginWarning: byId("login-warning"),
+    restoreRetry: byId("restore-retry"),
+    restoreForget: byId("restore-forget"),
+    restoreActions: byId("restore-actions"),
+    restoreStatus: byId("restore-status"),
+    restoreError: byId("restore-error"),
+    restoreSpinner: byId("restore-spinner"),
+    storageWarningApp: byId("storage-warning-app"),
+    reloadBtn: byId("reload-btn"),
+    keysImport: byId("keys-import"),
+    keysEmptyImport: byId("keys-empty-import"),
+    status: byId("status"),
+    statTotal: byId("stat-total"),
+    statAvailable: byId("stat-available"),
+    statUnavailable: byId("stat-unavailable"),
+    statDisabled: byId("stat-disabled"),
+    keysSearch: byId("keys-search"),
+    keysStatusFilter: byId("keys-status-filter"),
+    keysModeFilter: byId("keys-mode-filter"),
+    keysCount: byId("keys-count"),
+    keysUpdated: byId("keys-updated"),
+    tableWrap: byId("table-wrap"),
+    filesBody: byId("files-body"),
+    keysEmpty: byId("keys-empty"),
+    importModal: byId("import-modal"),
+    importForm: byId("import-form"),
+    keys: byId("keys"),
+    label: byId("label"),
+    importMode: byId("import-mode"),
+    importBtn: byId("import-btn"),
+    importProgress: byId("import-progress"),
+    importStatus: byId("import-status"),
+    importClose: byId("import-close"),
+    importCancel: byId("import-cancel"),
+    quotaModal: byId("quota-modal"),
+    quotaClose: byId("quota-close"),
+    quotaCloseFooter: byId("quota-close-footer"),
+    quotaRefresh: byId("quota-refresh"),
+    quotaTitle: byId("quota-title"),
+    quotaSelection: byId("quota-selection"),
+    quotaStatus: byId("quota-status"),
+    quotaUpdated: byId("quota-updated"),
+    quotaPanel: byId("quota-panel"),
+    quotaSummary: byId("quota-summary"),
+    quotaCreditsTotal: byId("quota-credits-total"),
+    quotaCreditsMonthly: byId("quota-credits-monthly"),
+    quotaCreditsPurchased: byId("quota-credits-purchased"),
+    quotaCreditsFree: byId("quota-credits-free"),
+    quotaTableWrap: byId("quota-table-wrap"),
+    quotaBody: byId("quota-body"),
+    quotaNoBuckets: byId("quota-no-buckets"),
+    dirtyModal: byId("dirty-modal"),
+    dirtyContinue: byId("dirty-continue"),
+    dirtyDiscard: byId("dirty-discard"),
+    modelsDirtyBadge: byId("models-dirty-badge"),
+    modelBody: byId("manual-model-body"),
+    modelStatus: byId("manual-model-status"),
+    modelId: byId("manual-model-id"),
+    modelProtocol: byId("manual-model-protocol"),
+    modelSave: byId("manual-model-save"),
+    modelReload: byId("manual-model-reload"),
+    modelAdd: byId("manual-model-add"),
+    manualModelDiscard: byId("manual-model-discard"),
+    settingMode: byId("setting-mode"),
+    settingCliVersion: byId("setting-cli-version"),
+    settingBaseUrl: byId("setting-base-url"),
+    settingZdr: byId("setting-zdr"),
+    settingCatalog: byId("setting-catalog"),
+    settingStale: byId("setting-stale"),
+    settingsStatus: byId("settings-status"),
+    settingsRetry: byId("settings-retry"),
+    logoutBtn: byId("logout-btn")
   };
 
   if (!el.mgmtKey || !el.keys || !el.filesBody || !el.status || !el.quotaStatus || !el.quotaBody) {
@@ -1298,22 +1415,102 @@ function initUi() {
 
   var endpoints = deriveEndpoints(window.location);
   var selects = createSelectController(window, doc);
+  var credentials = managementCredentials(window, PLUGIN_ID + ".management-key:" + endpoints.keysUrl);
   var secureContext = false;
   var busy = false;
+  var sessionKey = "";
+  var generation = 0;
+  var requests = [];
+  var rows = [];
+  var activeTab = "keys";
+  var activeModal = null;
+  var modalOpener = null;
+  var guardAction = null;
+  var selectedQuota = null;
   var manualDraft = [];
+  var savedModels = [];
   var modelsLoaded = false;
   var modelsDirty = false;
-  var modelBody = doc.getElementById("manual-model-body");
-  var modelStatus = doc.getElementById("manual-model-status");
-  var modelId = doc.getElementById("manual-model-id");
-  var modelProtocol = doc.getElementById("manual-model-protocol");
-  var modelSave = doc.getElementById("manual-model-save");
-  var modelReload = doc.getElementById("manual-model-reload");
-  var modelAdd = doc.getElementById("manual-model-add");
+  var restored = null;
+  var modelBody = el.modelBody;
+
+  function message(id, text) {
+    var node = byId(id);
+    if (!node) return;
+    node.textContent = text || "";
+    node.hidden = !text;
+  }
+
+  function showLogin(restoring) {
+    if (el.appShell) el.appShell.hidden = true;
+    if (el.loginView) el.loginView.hidden = !!restoring;
+    if (el.restoringView) el.restoringView.hidden = !restoring;
+    if (el.workspace) el.workspace.inert = false;
+  }
+
+  function syncSelects() {
+    selects.refresh();
+  }
+
+  function closeModal() {
+    if (activeModal) activeModal.hidden = true;
+    activeModal = null;
+    if (el.workspace) el.workspace.inert = false;
+    if (modalOpener && modalOpener.isConnected && !modalOpener.disabled && modalOpener.focus) {
+      modalOpener.focus();
+    }
+    modalOpener = null;
+    syncSelects();
+  }
+
+  function openModal(modalElem, focusElem) {
+    if (activeModal) closeModal();
+    modalOpener = doc.activeElement;
+    activeModal = modalElem;
+    if (!activeModal) return;
+    activeModal.hidden = false;
+    if (el.workspace) el.workspace.inert = true;
+    syncSelects();
+    var first = focusElem || (activeModal.querySelectorAll ? activeModal.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])")[0] : null);
+    if (first && first.focus) first.focus();
+  }
+
+  function guarded(action) {
+    if (busy) return;
+    if (!modelsDirty) { action(); return; }
+    guardAction = action;
+    openModal(el.dirtyModal, el.dirtyContinue);
+  }
+
+  function selectTab(tab) {
+    ["keys", "models", "settings"].forEach(function (name) {
+      var selected = name === tab;
+      var page = byId("page-" + name);
+      if (page) page.hidden = !selected;
+    });
+    var tabButtons = doc.querySelectorAll("[data-tab]");
+    tabButtons.forEach(function (button) {
+      var selected = button.getAttribute("data-tab") === tab;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    activeTab = tab;
+    var mainContent = byId("main-content");
+    if (mainContent) mainContent.scrollTop = 0;
+    if (tab === "models" && !modelsLoaded) loadSettings();
+    if (tab === "settings") loadSettings();
+    syncSelects();
+  }
 
   function setStatus(message, level) {
     el.status.textContent = message;
     el.status.className = "status" + (level ? " " + level : "");
+    if (activeModal === el.importModal) {
+      el.importStatus.textContent = message;
+      el.importStatus.className = el.status.className;
+      el.importStatus.hidden = !message;
+    }
   }
 
   function setQuotaStatus(message, level) {
@@ -1323,46 +1520,135 @@ function initUi() {
 
   var QUOTA_IDLE_MESSAGE = "尚未选择密钥。请在“已托管的密钥”列表中点击某个密钥的“查看配额”。";
 
-  // Drop any rendered quota so a stale selection is never shown as current.
   function clearQuota() {
     el.quotaPanel.hidden = true;
     el.quotaSelection.textContent = "";
-    if (el.quotaSummary) {
-      el.quotaSummary.hidden = true;
-    }
-    if (el.quotaNoBuckets) {
-      el.quotaNoBuckets.hidden = true;
-    }
+    if (el.quotaSummary) el.quotaSummary.hidden = true;
+    if (el.quotaNoBuckets) el.quotaNoBuckets.hidden = true;
     while (el.quotaBody.firstChild) {
       el.quotaBody.removeChild(el.quotaBody.firstChild);
     }
     setQuotaStatus(QUOTA_IDLE_MESSAGE, "info");
   }
 
+  function disconnect(reason) {
+    generation++;
+    sessionKey = "";
+    requests.forEach(function (controller) { controller.abort(); });
+    requests = [];
+    credentials.clear();
+    restored = null;
+    if (el.mgmtKey) el.mgmtKey.value = "";
+    if (el.mgmtKey) el.mgmtKey.type = "password";
+    if (el.keys) el.keys.value = "";
+    if (el.label) el.label.value = "";
+    rows = [];
+    manualDraft = [];
+    savedModels = [];
+    modelsLoaded = false;
+    modelsDirty = false;
+    selectedQuota = null;
+    if (el.modelId) el.modelId.value = "";
+    if (el.modelProtocol) el.modelProtocol.value = "";
+    ["settingMode", "settingCliVersion", "settingBaseUrl", "settingZdr", "settingCatalog",
+      "quotaCreditsTotal", "quotaCreditsMonthly", "quotaCreditsPurchased", "quotaCreditsFree"].forEach(function (name) {
+      if (el[name]) el[name].textContent = "—";
+    });
+    closeModal();
+    clearQuota();
+    renderFiles([]);
+    renderManualModels();
+    if (el.restoreActions) el.restoreActions.hidden = true;
+    if (el.restoreError) el.restoreError.hidden = true;
+    message("login-warning", "");
+    if (el.storageWarningApp) el.storageWarningApp.hidden = true;
+    message("login-error", reason || "");
+    showLogin(false);
+  }
+
+  function currentKey() {
+    return sessionKey;
+  }
+
+  async function managementFetch(url, init) {
+    var ticket = generation;
+    var controller = new AbortController();
+    var external = init && init.signal;
+    var abort = function () { controller.abort(); };
+    if (external) {
+      if (external.aborted) controller.abort();
+      else if (external.addEventListener) external.addEventListener("abort", abort, { once: true });
+    }
+    if (!init) init = {};
+    init.signal = controller.signal;
+    init.redirect = "error";
+    init.credentials = "omit";
+    init.cache = "no-store";
+    requests.push(controller);
+    var timer = window.setTimeout(abort, 15000);
+    try {
+      var response = await fetch(url, init);
+      if (ticket !== generation) throw new Error("管理会话已结束。");
+      if (response.status === 401) {
+        disconnect("管理密钥已失效，请重新登录（401）。");
+        var unauthorized = new Error("管理认证失败。");
+        unauthorized.status = 401;
+        throw unauthorized;
+      }
+      var text = await response.text();
+      if (ticket !== generation || controller.signal.aborted) throw new Error("管理会话已结束或请求超时。");
+      return {
+        status: response.status,
+        ok: response.ok,
+        text: function () { return Promise.resolve(text); },
+        json: function () { return Promise.resolve().then(function () { return JSON.parse(text); }); }
+      };
+    } finally {
+      window.clearTimeout(timer);
+      requests = requests.filter(function (entry) { return entry !== controller; });
+      if (external && external.removeEventListener) external.removeEventListener("abort", abort);
+    }
+  }
+
   function setBusy(flag) {
     busy = flag;
     var disabled = flag || !secureContext;
-    el.refreshBtn.disabled = disabled;
-    el.importBtn.disabled = disabled;
-    el.reloadBtn.disabled = disabled;
-    el.mgmtKey.disabled = disabled;
-    if (modelId) modelId.disabled = disabled || !modelsLoaded;
-    if (modelProtocol) modelProtocol.disabled = disabled || !modelsLoaded;
-    if (modelAdd) modelAdd.disabled = disabled || !modelsLoaded;
-    if (modelReload) modelReload.disabled = disabled;
-    if (modelSave) modelSave.disabled = disabled || !modelsLoaded || !modelsDirty;
-    if (modelBody) {
-      var modelButtons = modelBody.querySelectorAll("button");
+    if (el.loginSubmit) el.loginSubmit.disabled = disabled;
+    if (el.mgmtKey) el.mgmtKey.disabled = disabled;
+    if (el.reloadBtn) el.reloadBtn.disabled = disabled;
+    if (el.keysImport) el.keysImport.disabled = disabled;
+    if (el.keysEmptyImport) el.keysEmptyImport.disabled = disabled;
+    if (el.keys) el.keys.disabled = disabled;
+    if (el.label) el.label.disabled = disabled;
+    if (el.importMode) el.importMode.disabled = disabled;
+    if (el.importBtn) el.importBtn.disabled = disabled;
+    if (el.importProgress) el.importProgress.hidden = !flag;
+    if (el.modelId) el.modelId.disabled = disabled || !modelsLoaded;
+    if (el.modelProtocol) el.modelProtocol.disabled = disabled || !modelsLoaded;
+    if (el.modelAdd) el.modelAdd.disabled = disabled || !modelsLoaded;
+    if (el.modelReload) el.modelReload.disabled = disabled;
+    if (el.modelSave) el.modelSave.disabled = disabled || !modelsLoaded || !modelsDirty;
+    if (el.manualModelDiscard) el.manualModelDiscard.disabled = disabled || !modelsDirty;
+    if (el.modelsDirtyBadge) el.modelsDirtyBadge.hidden = !modelsDirty;
+    if (el.settingsRetry) el.settingsRetry.disabled = disabled;
+    if (el.logoutBtn) el.logoutBtn.disabled = disabled;
+    if (el.restoreRetry) el.restoreRetry.disabled = disabled;
+    if (el.restoreForget) el.restoreForget.disabled = disabled;
+    if (el.toggleKeyVisibility) el.toggleKeyVisibility.disabled = disabled;
+    if (el.rememberLogin) el.rememberLogin.disabled = disabled;
+    [el.importClose, el.importCancel, el.quotaClose, el.quotaCloseFooter, el.quotaRefresh].forEach(function (button) {
+      button.disabled = disabled;
+    });
+
+    var tabs = doc.querySelectorAll("[data-tab]");
+    tabs.forEach(function (tab) { tab.disabled = disabled; });
+
+    if (el.modelBody) {
+      var modelButtons = el.modelBody.querySelectorAll("button");
       for (var b = 0; b < modelButtons.length; b++) {
         modelButtons[b].disabled = disabled;
       }
     }
-    // Lock the key inputs while busy so an in-flight response can never clear
-    // text the user typed after submitting.
-    el.keys.disabled = disabled;
-    el.label.disabled = disabled;
-    if (el.importMode) el.importMode.disabled = disabled;
-    el.importProgress.hidden = !flag;
     var actionButtons = el.filesBody.querySelectorAll("button[data-action]");
     for (var i = 0; i < actionButtons.length; i++) {
       var blocked = disabled;
@@ -1376,31 +1662,101 @@ function initUi() {
     for (var s = 0; s < modeSelects.length; s++) {
       modeSelects[s].disabled = disabled || !isSafeAuthIndex(modeSelects[s].getAttribute("data-auth-index"));
     }
-    selects.refresh();
+    syncSelects();
   }
 
   function applySecurityGate() {
     secureContext = isSecureUiContext(window.location);
-    el.insecureWarning.hidden = secureContext;
-    el.mgmtKey.disabled = !secureContext;
-    el.keys.disabled = !secureContext;
-    el.label.disabled = !secureContext;
+    showLogin(false);
+    if (el.insecureWarning) el.insecureWarning.hidden = secureContext;
+    if (el.mgmtKey) el.mgmtKey.disabled = !secureContext;
+    if (el.keys) el.keys.disabled = !secureContext;
+    if (el.label) el.label.disabled = !secureContext;
     if (el.importMode) el.importMode.disabled = !secureContext;
     clearQuota();
     setBusy(false);
     if (secureContext) {
-      setStatus("尚未加载。请输入 CPA 管理密钥并点击“连接并刷新”。", "info");
+      showLogin(false);
     } else {
       setStatus("当前环境不安全，已禁用密钥操作。请改用 HTTPS 或本机地址访问。", "error");
     }
+    syncSelects();
   }
 
-  function disconnect() {
-    el.mgmtKey.value = "";
-  }
-
-  function currentKey() {
-    return typeof el.mgmtKey.value === "string" ? el.mgmtKey.value : "";
+  async function authenticate(key, persistent, restoring) {
+    if (busy || !secureContext) return;
+    if (!key) {
+      message("login-error", "请输入 CPA 管理密钥。");
+      if (el.mgmtKey && el.mgmtKey.focus) el.mgmtKey.focus();
+      return;
+    }
+    generation++;
+    var ticket = generation;
+    sessionKey = key;
+    message("login-error", "");
+    message("login-warning", "");
+    if (el.restoreActions) el.restoreActions.hidden = true;
+    showLogin(true);
+    setBusy(true);
+    var success = false;
+    try {
+      var response = await managementFetch(endpoints.keysUrl, buildManagementRequest(key, { method: "GET" }));
+      if (!response.ok) {
+        throw new Error(response.status === 403
+          ? "管理访问被拒绝（403），请检查远程管理权限或 IP 限制。"
+          : describeHttpFailure(response.status));
+      }
+      var text = await response.text();
+      var payload;
+      try {
+        payload = JSON.parse(text);
+      } catch (_) {
+        throw new Error("密钥列表响应格式无效");
+      }
+      if (!isPlainObject(payload) || !Array.isArray(payload.files)) {
+        throw new Error("密钥列表响应格式无效");
+      }
+      if (ticket !== generation) return;
+      var stored = restoring ? {
+        mode: persistent ? "已记住管理登录" : "仅当前标签页会话", warning: ""
+      } : credentials.save(key, persistent);
+      restored = null;
+      if (el.storageWarningApp) {
+        el.storageWarningApp.textContent = stored.warning || "";
+        el.storageWarningApp.hidden = !stored.warning;
+      }
+      var rowsData = normalizeFileEntries(payload.files);
+      renderFiles(rowsData);
+      if (el.mgmtKey) el.mgmtKey.value = "";
+      if (el.loginView) el.loginView.hidden = true;
+      if (el.restoringView) el.restoringView.hidden = true;
+      if (el.appShell) el.appShell.hidden = false;
+      selectTab("keys");
+      setStatus(rowsData.length ? "已加载 " + rowsData.length + " 条密钥。" : "列表为空，暂无已托管的密钥。", "ok");
+      success = true;
+    } catch (error) {
+      if (ticket !== generation) return;
+      sessionKey = "";
+      showLogin(false);
+      message("login-error", error.message || "无法连接 CPA 管理接口，请手动重试。");
+      if (restoring) {
+        restored = { key: key, persistent: persistent };
+        showLogin(true);
+        if (el.restoreSpinner) el.restoreSpinner.hidden = true;
+        if (el.restoreError) {
+          el.restoreError.textContent = error.message || "无法验证已保存的管理登录。";
+          el.restoreError.hidden = false;
+        }
+        if (el.restoreActions) el.restoreActions.hidden = false;
+        message("login-warning", "已保留本插件保存的管理凭据，请检查服务后手动重试。");
+      }
+    } finally {
+      key = "";
+      setBusy(false);
+      if (success) {
+        loadSettings();
+      }
+    }
   }
 
   function appendCell(row, text, className) {
@@ -1415,11 +1771,20 @@ function initUi() {
 
   function buildRow(row) {
     var tr = doc.createElement("tr");
-    appendCell(tr, row.name, "cell-name");
-    appendCell(tr, row.label || "—");
+
+    var credential = appendCell(tr, "", "col-credential cell-credential");
+    var label = doc.createElement("p");
+    label.className = "credential-name";
+    label.textContent = row.label || row.name;
+    credential.appendChild(label);
+    var name = doc.createElement("p");
+    name.className = "credential-file";
+    name.textContent = row.name;
+    name.title = row.name;
+    credential.appendChild(name);
 
     var modeCell = doc.createElement("td");
-    modeCell.className = "cell-mode";
+    modeCell.className = "col-mode cell-mode";
 
     var modeSelect = doc.createElement("select");
     modeSelect.className = "select-mode";
@@ -1452,7 +1817,7 @@ function initUi() {
     }
     modeSelect.appendChild(providerOption);
 
-    modeSelect.value = row.modeError ? "" : row.mode;
+    modeSelect.value = row.pendingMode || (row.modeError ? "" : row.mode);
     modeSelect.disabled = busy || !secureContext || !isSafeAuthIndex(row.authIndex);
     modeCell.appendChild(modeSelect);
 
@@ -1463,38 +1828,47 @@ function initUi() {
     saveModeBtn.setAttribute("data-auth-index", row.authIndex);
     saveModeBtn.setAttribute("data-file-name", row.rawName);
     saveModeBtn.textContent = "保存模式";
+    saveModeBtn.hidden = !row.pendingMode;
     saveModeBtn.setAttribute("aria-label", "保存密钥 " + toCellText(row.rawName) + " 的模式配置");
     saveModeBtn.disabled = busy || !secureContext || !isSafeAuthIndex(row.authIndex);
     saveModeBtn.addEventListener("click", function (event) {
       onSaveModeClick(event, modeSelect);
     });
+    modeSelect.addEventListener("change", function () {
+      row.pendingMode = modeSelect.value !== row.mode ? modeSelect.value : "";
+      saveModeBtn.hidden = !row.pendingMode;
+    });
     modeCell.appendChild(saveModeBtn);
 
     if (row.modeError) {
       var modeBadge = doc.createElement("span");
-      modeBadge.className = "mode-source-badge mode-error";
+      modeBadge.className = "mode-source is-error";
       modeBadge.textContent = "模式异常";
       modeCell.appendChild(modeBadge);
     } else if (row.modeSource === "default") {
       var modeBadge = doc.createElement("span");
-      modeBadge.className = "mode-source-badge mode-default";
+      modeBadge.className = "mode-source is-default";
       modeBadge.textContent = "旧凭据默认";
       modeCell.appendChild(modeBadge);
     } else if (row.modeSource === "auth") {
       var modeBadge = doc.createElement("span");
-      modeBadge.className = "mode-source-badge mode-auth";
+      modeBadge.className = "mode-source is-auth";
       modeBadge.textContent = "已单独配置";
       modeCell.appendChild(modeBadge);
     }
     tr.appendChild(modeCell);
 
-    appendCell(tr, row.status || "—");
-    appendCell(tr, row.disabled ? "是" : "否");
-    appendCell(tr, row.unavailable ? "不可用" : "可用", row.unavailable ? "cell-warn" : "cell-ok");
-    appendCell(tr, String(row.success));
-    appendCell(tr, String(row.failed));
+    var statusCell = appendCell(tr, "", "col-status");
+    var badge = doc.createElement("span");
+    badge.className = "badge " + (row.disabled ? "badge-muted" : row.unavailable ? "badge-danger" : "badge-success");
+    badge.textContent = row.status || "—";
+    statusCell.appendChild(badge);
+
+    appendCell(tr, (row.disabled ? "已禁用" : "未禁用") + " · " + (row.unavailable ? "不可用" : "可用"), "col-availability cell-availability");
+    appendCell(tr, row.success + " / " + row.failed, "col-counts counts");
+
     var actions = doc.createElement("td");
-    actions.className = "cell-actions";
+    actions.className = "col-actions cell-actions";
 
     var quotaLabel = row.quotaAvailable
       ? "查看密钥 " + toCellText(row.rawName) + " 的配额"
@@ -1514,7 +1888,7 @@ function initUi() {
     if (row.deletable) {
       var button = doc.createElement("button");
       button.type = "button";
-      button.className = "btn btn-danger btn-sm";
+      button.className = "btn btn-ghost btn-sm btn-danger-text";
       button.setAttribute("data-action", "delete");
       button.setAttribute("data-file-name", row.rawName);
       button.textContent = "删除";
@@ -1527,42 +1901,62 @@ function initUi() {
     return tr;
   }
 
-  function updateSummary(rows) {
-    var total = rows.length;
+  function updateSummary(allRows) {
+    var total = allRows.length;
     var unavailable = 0;
     var disabled = 0;
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].unavailable) {
-        unavailable++;
-      }
-      if (rows[i].disabled) {
-        disabled++;
-      }
+    for (var i = 0; i < allRows.length; i++) {
+      if (allRows[i].unavailable) unavailable++;
+      if (allRows[i].disabled) disabled++;
     }
-    el.summary.textContent =
-      "共 " + total + " 条：可用 " + (total - unavailable) + "，不可用 " + unavailable + "，已禁用 " + disabled + "。";
+    if (el.statTotal) el.statTotal.textContent = String(total);
+    if (el.statAvailable) el.statAvailable.textContent = String(allRows.filter(function (row) { return !row.disabled && !row.unavailable; }).length);
+    if (el.statUnavailable) el.statUnavailable.textContent = String(unavailable);
+    if (el.statDisabled) el.statDisabled.textContent = String(disabled);
   }
 
-  function renderFiles(rows) {
-    el.tableWrap.classList.toggle("is-empty", rows.length === 0);
+  function renderFiles(nextRows) {
+    rows = nextRows;
+    updateSummary(rows);
+    renderFilteredFiles();
+  }
+
+  function renderFilteredFiles() {
+    var query = el.keysSearch ? el.keysSearch.value.toLowerCase().trim() : "";
+    var statusFilter = el.keysStatusFilter ? el.keysStatusFilter.value : "all";
+    var modeFilter = el.keysModeFilter ? el.keysModeFilter.value : "all";
+    var filtered = rows.filter(function (row) {
+      var matchesQuery = !query || (row.name + " " + (row.label || "")).toLowerCase().indexOf(query) >= 0;
+      var matchesStatus = statusFilter === "all" ||
+        (statusFilter === "disabled" ? row.disabled :
+         statusFilter === "error" ? row.unavailable :
+         statusFilter === "ok" ? (!row.disabled && !row.unavailable) : true);
+      var matchesMode = modeFilter === "all" ||
+        (modeFilter === "error" ? row.modeError : row.mode === modeFilter && !row.modeError);
+      return matchesQuery && matchesStatus && matchesMode;
+    });
+
+    if (el.tableWrap) el.tableWrap.hidden = rows.length === 0;
+    if (el.keysEmpty) el.keysEmpty.hidden = rows.length !== 0;
+    if (el.keysCount) el.keysCount.textContent = filtered.length + " 条凭据";
+
     while (el.filesBody.firstChild) {
       el.filesBody.removeChild(el.filesBody.firstChild);
     }
-    if (!rows.length) {
+    if (!filtered.length) {
       var emptyRow = doc.createElement("tr");
       var emptyCell = doc.createElement("td");
-      emptyCell.colSpan = 9;
+      emptyCell.colSpan = 6;
       emptyCell.className = "empty-cell";
-      emptyCell.textContent = "暂无数据。";
+      emptyCell.textContent = rows.length ? "没有匹配的凭据。" : "暂无数据。";
       emptyRow.appendChild(emptyCell);
       el.filesBody.appendChild(emptyRow);
     } else {
-      for (var i = 0; i < rows.length; i++) {
-        el.filesBody.appendChild(buildRow(rows[i]));
+      for (var i = 0; i < filtered.length; i++) {
+        el.filesBody.appendChild(buildRow(filtered[i]));
       }
     }
-    updateSummary(rows);
-    selects.refresh();
+    syncSelects();
   }
 
   function readJson(response) {
@@ -1617,14 +2011,14 @@ function initUi() {
     }
   }
 
-  function refreshList() {
+  async function refreshList() {
     if (busy || !secureContext) {
       return;
     }
     var managementKey = currentKey();
     if (!managementKey) {
       setStatus("请先输入 CPA 管理密钥。", "error");
-      el.mgmtKey.focus();
+      if (el.mgmtKey && el.mgmtKey.focus) el.mgmtKey.focus();
       return;
     }
 
@@ -1632,84 +2026,75 @@ function initUi() {
     setBusy(true);
     setStatus("正在加载密钥列表…", "info");
 
-    fetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "GET" }))
-      .then(function (response) {
-        if (response.status === 401 || response.status === 403) {
-          disconnect();
-          setStatus(describeHttpFailure(response.status), "error");
-          return null;
-        }
-        if (!response.ok) {
-          setStatus(describeHttpFailure(response.status), "error");
-          return null;
-        }
-        // A 200 body must be a plain object carrying a real files array. Any
-        // other JSON, including null/false/0, is a protocol failure: surface a
-        // fixed local error and preserve the rendered list instead of stalling on
-        // the loading status or claiming the key directory is empty.
-        return readJson(response)
-          .then(function (payload) {
-            if (!isPlainObject(payload) || !Array.isArray(payload.files)) {
-              throw new Error("密钥列表响应格式无效");
-            }
-            return payload;
-          })
-          .catch(function () {
-            setStatus("密钥列表响应格式无效，已保留当前列表。", "error");
-            return null;
-          });
-      })
-      .then(function (payload) {
-        if (!payload) {
-          return;
-        }
-        var rows = normalizeFileEntries(payload.files);
-        renderFiles(rows);
-        setStatus(rows.length ? "已加载 " + rows.length + " 条密钥。" : "列表为空，暂无已托管的密钥。", "ok");
-      })
-      .catch(function () {
+    try {
+      var response = await managementFetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "GET" }));
+      if (!response.ok) {
+        setStatus(describeHttpFailure(response.status), "error");
+        return;
+      }
+      var text = await response.text();
+      var payload;
+      try {
+        payload = JSON.parse(text);
+      } catch (_) {
+        throw new Error("密钥列表响应格式无效");
+      }
+      if (!isPlainObject(payload) || !Array.isArray(payload.files)) {
+        throw new Error("密钥列表响应格式无效");
+      }
+      var nextRows = normalizeFileEntries(payload.files);
+      renderFiles(nextRows);
+      el.keysUpdated.textContent = "更新于 " + new Date().toLocaleTimeString();
+      setStatus(nextRows.length ? "已加载 " + nextRows.length + " 条密钥。" : "列表为空，暂无已托管的密钥。", "ok");
+    } catch (err) {
+      if (err.status === 401) return;
+      if (err.message === "密钥列表响应格式无效") {
+        setStatus("密钥列表响应格式无效，已保留当前列表。", "error");
+      } else {
         setStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
-      })
-      .then(function () {
-        managementKey = "";
-        setBusy(false);
-        selects.refresh();
-        if (!modelsDirty && currentKey()) {
-          loadSettings();
-        }
-      });
+      }
+    } finally {
+      managementKey = "";
+      setBusy(false);
+      syncSelects();
+      if (!modelsDirty && currentKey()) {
+        loadSettings();
+      }
+    }
   }
 
-  function importKeys() {
+  async function importKeys() {
     if (busy || !secureContext) {
       return;
     }
     var managementKey = currentKey();
     if (!managementKey) {
       setStatus("请先输入 CPA 管理密钥（管理认证）。", "error");
-      el.mgmtKey.focus();
+      if (el.mgmtKey && el.mgmtKey.focus) el.mgmtKey.focus();
       return;
     }
 
-    var labelCheck = validateLabel(el.label.value);
+    var labelCheck = validateLabel(el.label ? el.label.value : "");
     if (!labelCheck.ok) {
-      setStatus(
-        labelCheck.reason === "too-long"
-          ? "标签过长（上限 " + MAX_LABEL_LENGTH + " 个字符）。"
-          : "标签包含非法控制字符。",
-        "error"
-      );
+      var msg = labelCheck.reason === "too-long"
+        ? "标签过长（上限 " + MAX_LABEL_LENGTH + " 个字符）。"
+        : "标签包含非法控制字符。";
+      setStatus(msg, "error");
+      if (el.importStatus) { el.importStatus.textContent = msg; el.importStatus.hidden = false; }
       return;
     }
 
-    var parsed = parseKeys(el.keys.value);
+    var parsed = parseKeys(el.keys ? el.keys.value : "");
     var notice = countNotice(parsed.counts);
     if (parsed.error) {
       setStatus(parsed.error.message, "error");
+      if (el.importStatus) { el.importStatus.textContent = parsed.error.message; el.importStatus.hidden = false; }
       return;
     }
     if (parsed.counts.valid === 0) {
-      setStatus("没有可导入的有效密钥" + notice + "。", "error");
+      var emptyMsg = "没有可导入的有效密钥" + notice + "。";
+      setStatus(emptyMsg, "error");
+      if (el.importStatus) { el.importStatus.textContent = emptyMsg; el.importStatus.hidden = false; }
       return;
     }
 
@@ -1729,37 +2114,34 @@ function initUi() {
 
     clearQuota();
     setBusy(true);
-    setStatus("正在导入 " + parsed.counts.valid + " 条密钥…" + notice, "info");
+    setStatus("正在导入 " + expectedCount + " 条密钥…" + notice, "info");
+    if (el.importStatus) { el.importStatus.textContent = "正在提交…"; el.importStatus.hidden = false; }
 
-    fetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "POST", body: payload.body }))
-      .then(function (response) {
-        if (response.status === 401 || response.status === 403) {
-          disconnect();
-          setStatus(describeHttpFailure(response.status), "error");
-          return null;
-        }
-        if (!response.ok) {
-          setStatus(describeHttpFailure(response.status), "error");
-          return null;
-        }
-        return readJson(response).then(function (resultPayload) {
-          var result = formatImportResult(response.status, resultPayload, expectedCount);
-          if (result.ok && result.failed === 0) {
-            el.keys.value = "";
-          }
-          var hint = result.ok ? " 请点击“刷新列表”查看最新状态。" : "";
-          setStatus(result.summary + notice + hint, result.level);
-        });
-      })
-      .catch(function () {
-        setStatus("无法确认导入结果，请检查网络并刷新列表后再决定是否重试。", "error");
-      })
-      .then(function () {
-        managementKey = "";
-        payload.body = "";
-        setBusy(false);
-        selects.refresh();
-      });
+    try {
+      var response = await managementFetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "POST", body: payload.body }));
+      if (!response.ok) {
+        setStatus(describeHttpFailure(response.status), "error");
+        return;
+      }
+      var text = await response.text();
+      var resultPayload = {};
+      try { if (text) resultPayload = JSON.parse(text); } catch (_) {}
+      var result = formatImportResult(response.status, resultPayload, expectedCount);
+      if (result.ok && result.failed === 0) {
+        if (el.keys) el.keys.value = "";
+        closeModal();
+      }
+      var hint = result.ok ? " 请点击“刷新列表”查看最新状态。" : "";
+      setStatus(result.summary + notice + hint, result.level);
+    } catch (err) {
+      if (err.status === 401) return;
+      setStatus("无法确认导入结果，请检查网络并刷新列表后再决定是否重试。", "error");
+    } finally {
+      managementKey = "";
+      payload.body = "";
+      setBusy(false);
+      syncSelects();
+    }
   }
 
   function onSaveModeClick(event, selectElem) {
@@ -1780,7 +2162,7 @@ function initUi() {
     saveMode(authIndex, selectedMode, fileName);
   }
 
-  function saveMode(authIndex, selectedMode, fileName) {
+  async function saveMode(authIndex, selectedMode, fileName) {
     if (busy || !secureContext) {
       return;
     }
@@ -1795,7 +2177,7 @@ function initUi() {
     var managementKey = currentKey();
     if (!managementKey) {
       setStatus("请先输入 CPA 管理密钥。", "error");
-      el.mgmtKey.focus();
+      if (el.mgmtKey && el.mgmtKey.focus) el.mgmtKey.focus();
       return;
     }
 
@@ -1805,79 +2187,57 @@ function initUi() {
     setBusy(true);
     setStatus("正在保存模式配置…", "info");
 
-    fetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "PATCH", body: patchPayload }))
-      .then(function (response) {
-        if (response.status === 401 || response.status === 403) {
-          disconnect();
-          setStatus(describeHttpFailure(response.status), "error");
-          return null;
+    try {
+      var patchResponse = await managementFetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "PATCH", body: patchPayload }));
+      if (!patchResponse.ok) {
+        setStatus(describeHttpFailure(patchResponse.status), "error");
+        return;
+      }
+      setStatus("模式已提交，正在确认生效…", "info");
+      var getResponse = await managementFetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "GET" }));
+      if (!getResponse.ok) {
+        setStatus("模式已提交，但无法获取最新列表以确认生效（" + getResponse.status + "）。", "error");
+        return;
+      }
+      var text = await getResponse.text();
+      var getPayload = {};
+      try { if (text) getPayload = JSON.parse(text); } catch (_) {}
+      var confirmed = false;
+      var newRows = null;
+      if (isPlainObject(getPayload) && Array.isArray(getPayload.files)) {
+        newRows = normalizeFileEntries(getPayload.files);
+        for (var i = 0; i < newRows.length; i++) {
+          if (newRows[i].authIndex === authIndex) {
+            if (newRows[i].mode === selectedMode && newRows[i].modeSource === "auth" && !newRows[i].modeError) {
+              confirmed = true;
+            }
+            break;
+          }
         }
-        if (!response.ok) {
-          setStatus(describeHttpFailure(response.status), "error");
-          return null;
-        }
-        return readJson(response);
-      })
-      .then(function (patchResult) {
-        if (!patchResult) {
-          return null;
-        }
-        setStatus("模式已提交，正在确认生效…", "info");
-        return fetch(endpoints.keysUrl, buildManagementRequest(managementKey, { method: "GET" }))
-          .then(function (getResponse) {
-            if (getResponse.status === 401 || getResponse.status === 403) {
-              disconnect();
-              setStatus(describeHttpFailure(getResponse.status), "error");
-              return null;
-            }
-            if (!getResponse.ok) {
-              setStatus("模式已提交，但无法获取最新列表以确认生效（" + getResponse.status + "）。", "error");
-              return null;
-            }
-            return readJson(getResponse);
-          })
-          .then(function (getPayload) {
-            if (!getPayload) {
-              return;
-            }
-            var confirmed = false;
-            var rows = null;
-            if (isPlainObject(getPayload) && Array.isArray(getPayload.files)) {
-              rows = normalizeFileEntries(getPayload.files);
-              for (var i = 0; i < rows.length; i++) {
-                if (rows[i].authIndex === authIndex) {
-                  if (rows[i].mode === selectedMode && rows[i].modeSource === "auth" && !rows[i].modeError) {
-                    confirmed = true;
-                  }
-                  break;
-                }
-              }
-            }
-            if (confirmed && rows) {
-              renderFiles(rows);
-              setStatus("密钥模式已更新为 " + (selectedMode === "provider" ? "Provider 模式" : "CLI 模式") + " 并确认生效。", "ok");
-            } else {
-              setStatus("模式配置未能确认生效，请核对凭据状态或刷新列表。", "error");
-            }
-          });
-      })
-      .catch(function () {
-        setStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
-      })
-      .then(function () {
-        managementKey = "";
-        patchPayload = "";
-        setBusy(false);
-        selects.refresh();
-      });
+      }
+      if (confirmed && newRows) {
+        renderFiles(newRows);
+        setStatus("密钥模式已更新为 " + (selectedMode === "provider" ? "Provider 模式" : "CLI 模式") + " 并确认生效。", "ok");
+      } else {
+        setStatus("模式配置未能确认生效，请核对凭据状态或刷新列表。", "error");
+      }
+    } catch (err) {
+      if (err.status === 401) return;
+      setStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
+    } finally {
+      managementKey = "";
+      patchPayload = "";
+      setBusy(false);
+      syncSelects();
+    }
   }
 
-  function onDeleteClick(event) {
+  async function onDeleteClick(event) {
     if (busy || !secureContext) {
       return;
     }
     var button = event.currentTarget;
-    var fileName = button.getAttribute("data-file-name");
+    var fileName = button ? button.getAttribute("data-file-name") : "";
     if (!isSafeFileName(fileName)) {
       setStatus("文件名无效，无法删除。", "error");
       return;
@@ -1885,7 +2245,7 @@ function initUi() {
     var managementKey = currentKey();
     if (!managementKey) {
       setStatus("请先输入 CPA 管理密钥。", "error");
-      el.mgmtKey.focus();
+      if (el.mgmtKey && el.mgmtKey.focus) el.mgmtKey.focus();
       return;
     }
     if (!window.confirm('确定删除密钥文件 "' + toCellText(fileName) + '" 吗？此操作不可撤销。')) {
@@ -1897,27 +2257,21 @@ function initUi() {
     setStatus("正在删除…", "info");
     var url = endpoints.credentialsUrl + "?name=" + encodeURIComponent(fileName);
 
-    fetch(url, buildManagementRequest(managementKey, { method: "DELETE" }))
-      .then(function (response) {
-        if (response.status === 401 || response.status === 403) {
-          disconnect();
-          setStatus(describeHttpFailure(response.status), "error");
-          return;
-        }
-        if (!response.ok) {
-          setStatus(describeHttpFailure(response.status), "error");
-          return;
-        }
-        setStatus("已删除。列表可能已过期，请点击“刷新列表”。", "ok");
-      })
-      .catch(function () {
-        setStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
-      })
-      .then(function () {
-        managementKey = "";
-        setBusy(false);
-        selects.refresh();
-      });
+    try {
+      var response = await managementFetch(url, buildManagementRequest(managementKey, { method: "DELETE" }));
+      if (!response.ok) {
+        setStatus(describeHttpFailure(response.status), "error");
+        return;
+      }
+      setStatus("已删除。列表可能已过期，请点击“刷新列表”。", "ok");
+    } catch (err) {
+      if (err.status === 401) return;
+      setStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
+    } finally {
+      managementKey = "";
+      setBusy(false);
+      syncSelects();
+    }
   }
 
   function renderQuota(parsed, name) {
@@ -1976,12 +2330,12 @@ function initUi() {
     el.quotaPanel.hidden = false;
   }
 
-  function onQuotaClick(event) {
+  async function onQuotaClick(event) {
     if (busy || !secureContext) {
       return;
     }
     var button = event.currentTarget;
-    var authIndex = button.getAttribute("data-auth-index");
+    var authIndex = button ? button.getAttribute("data-auth-index") : "";
     if (!isSafeAuthIndex(authIndex)) {
       clearQuota();
       setQuotaStatus("该密钥缺少可用的凭据索引，无法查看配额。", "error");
@@ -1990,51 +2344,43 @@ function initUi() {
     var managementKey = currentKey();
     if (!managementKey) {
       setStatus("请先输入 CPA 管理密钥。", "error");
-      el.mgmtKey.focus();
+      if (el.mgmtKey && el.mgmtKey.focus) el.mgmtKey.focus();
       return;
     }
+    var rowName = toCellText(button ? button.getAttribute("data-file-name") : "");
+    selectedQuota = { authIndex: authIndex, name: rowName };
     var payload = buildQuotaPayload(authIndex);
-    var rowName = toCellText(button.getAttribute("data-file-name"));
 
     clearQuota();
+    openModal(el.quotaModal, el.quotaCloseFooter);
     setBusy(true);
     setQuotaStatus("正在查询配额…", "info");
 
-    fetch(endpoints.quotaUrl, buildManagementRequest(managementKey, { method: "POST", body: payload.body }))
-      .then(function (response) {
-        if (response.status === 401 || response.status === 403) {
-          disconnect();
-          clearQuota();
-          setQuotaStatus(describeHttpFailure(response.status), "error");
-          return null;
-        }
-        if (!response.ok) {
-          setQuotaStatus(describeQuotaFailure(response.status), "error");
-          return null;
-        }
-        return readJson(response);
-      })
-      .then(function (result) {
-        if (result === null) {
-          return;
-        }
-        var parsed = parseQuotaResponse(result);
-        if (!parsed.ok) {
-          setQuotaStatus("配额数据不可用，未显示任何配额信息。", "error");
-          return;
-        }
-        renderQuota(parsed, rowName);
-        setQuotaStatus("已加载所选密钥的配额。", "ok");
-      })
-      .catch(function () {
-        setQuotaStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
-      })
-      .then(function () {
-        managementKey = "";
-        payload.body = "";
-        setBusy(false);
-        selects.refresh();
-      });
+    try {
+      var response = await managementFetch(endpoints.quotaUrl, buildManagementRequest(managementKey, { method: "POST", body: payload.body }));
+      if (!response.ok) {
+        setQuotaStatus(describeQuotaFailure(response.status), "error");
+        return;
+      }
+      var text = await response.text();
+      var result = {};
+      try { if (text) result = JSON.parse(text); } catch (_) {}
+      var parsed = parseQuotaResponse(result);
+      if (!parsed.ok) {
+        setQuotaStatus("配额数据不可用，未显示任何配额信息。", "error");
+        return;
+      }
+      renderQuota(parsed, rowName);
+      setQuotaStatus("已加载所选密钥的配额。", "ok");
+    } catch (err) {
+      if (err.status === 401) return;
+      setQuotaStatus("无法连接 CPA 管理接口，请确认地址与网络。", "error");
+    } finally {
+      managementKey = "";
+      payload.body = "";
+      setBusy(false);
+      syncSelects();
+    }
   }
 
   function renderManualModels() {
@@ -2061,7 +2407,7 @@ function initUi() {
         manualDraft.splice(index, 1);
         modelsDirty = true;
         renderManualModels();
-        if (modelStatus) modelStatus.textContent = "有未保存的模型草稿。";
+        if (el.modelStatus) el.modelStatus.textContent = "有未保存的模型草稿。";
         setBusy(false);
         selects.refresh();
       });
@@ -2072,16 +2418,9 @@ function initUi() {
   }
 
   async function manualRequest(url, method, payload, key, signal) {
-    if (currentKey() !== key || signal.aborted) throw new Error("连接已变更或操作超时。");
     var init = buildManagementRequest(key, { method: method, body: payload === undefined ? undefined : JSON.stringify(payload) });
-    init.signal = signal;
-    init.redirect = "error";
-    var response = await fetch(url, init);
-    if (currentKey() !== key || signal.aborted) throw new Error("连接已变更或操作超时。");
-    if (response.status === 401 || response.status === 403) {
-      disconnect();
-      throw new Error("管理认证失败，请核对管理密钥。");
-    }
+    if (signal) init.signal = signal;
+    var response = await managementFetch(url, init);
     if (!response.ok) {
       var err = new Error("管理请求失败（HTTP " + response.status + "）。");
       err.status = response.status;
@@ -2096,23 +2435,26 @@ function initUi() {
     var controller = new AbortController();
     var timer = window.setTimeout(function () { controller.abort(); }, 15000);
     setBusy(true);
-    if (modelStatus) modelStatus.textContent = "正在加载生效设置与模型…";
+    if (el.modelStatus) el.modelStatus.textContent = "正在加载生效设置与模型…";
+    if (el.settingsStatus) el.settingsStatus.textContent = "正在加载运行状态…";
     try {
       var settings = await manualRequest(endpoints.settingsUrl, "GET", undefined, key, controller.signal);
-      if (currentKey() !== key || controller.signal.aborted) throw new Error("连接已变更或操作超时。");
       renderSettings(settings);
       manualDraft = normalizeManualModels(settings["manual-models"]);
+      savedModels = manualDraft.slice();
       modelsLoaded = true;
       modelsDirty = false;
       renderManualModels();
-      if (modelStatus) modelStatus.textContent = "已加载当前生效的手动模型。";
+      if (el.modelStatus) el.modelStatus.textContent = "已加载当前生效的手动模型。";
+      if (el.settingsStatus) el.settingsStatus.textContent = "已加载运行状态。";
     } catch (_) {
-      if (modelStatus) modelStatus.textContent = "加载失败，现有草稿保留；请核对管理认证与插件状态。";
+      if (el.modelStatus) el.modelStatus.textContent = "加载失败，现有草稿保留；请核对管理认证与插件状态。";
+      if (el.settingsStatus) el.settingsStatus.textContent = "加载运行状态失败，请点击重新加载。";
     } finally {
       key = "";
       window.clearTimeout(timer);
       setBusy(false);
-      selects.refresh();
+      syncSelects();
     }
   }
 
@@ -2122,7 +2464,7 @@ function initUi() {
     try {
       patch = { "manual-models": normalizeManualModels(manualDraft) };
     } catch (err) {
-      if (modelStatus) modelStatus.textContent = err.message;
+      if (el.modelStatus) el.modelStatus.textContent = err.message;
       return;
     }
     var key = currentKey();
@@ -2130,7 +2472,7 @@ function initUi() {
     var timer = window.setTimeout(function () { controller.abort(); }, 15000);
     var writeAttempted = false;
     setBusy(true);
-    if (modelStatus) modelStatus.textContent = "正在校验并保存…";
+    if (el.modelStatus) el.modelStatus.textContent = "正在校验并保存…";
     try {
       var valid = await manualRequest(endpoints.validateUrl, "POST", patch, key, controller.signal);
       if (valid.valid !== true) throw new Error("服务端未确认校验通过。");
@@ -2161,12 +2503,13 @@ function initUi() {
       }
       if (!confirmed || controller.signal.aborted || currentKey() !== key) throw new Error("未确认配置生效。");
       manualDraft = patch["manual-models"];
+      savedModels = manualDraft.slice();
       modelsDirty = false;
       renderManualModels();
-      if (modelStatus) modelStatus.textContent = "已保存并确认手动模型配置生效。";
+      if (el.modelStatus) el.modelStatus.textContent = "已保存并确认手动模型配置生效。";
     } catch (_) {
-      if (modelStatus) {
-        modelStatus.textContent = writeAttempted
+      if (el.modelStatus) {
+        el.modelStatus.textContent = writeAttempted
           ? "可能已写入，但未确认生效；草稿保留，请重新加载核对。"
           : "校验或保存失败，未发出写入请求；草稿保留。";
       }
@@ -2174,57 +2517,168 @@ function initUi() {
       key = "";
       window.clearTimeout(timer);
       setBusy(false);
-      selects.refresh();
+      syncSelects();
     }
   }
 
-  if (modelAdd) {
-    modelAdd.addEventListener("click", function () {
+  if (el.modelAdd) {
+    el.modelAdd.addEventListener("click", function () {
       if (busy || !secureContext || !modelsLoaded) return;
       try {
-        manualDraft = normalizeManualModels(manualDraft.concat([{ id: modelId.value, protocol: modelProtocol.value }]));
+        manualDraft = normalizeManualModels(manualDraft.concat([{ id: el.modelId ? el.modelId.value : "", protocol: el.modelProtocol ? el.modelProtocol.value : "" }]));
         modelsDirty = true;
-        modelId.value = "";
+        if (el.modelId) el.modelId.value = "";
         renderManualModels();
-        if (modelStatus) modelStatus.textContent = "有未保存的模型草稿。";
+        if (el.modelStatus) el.modelStatus.textContent = "有未保存的模型草稿。";
         setBusy(false);
-        selects.refresh();
+        syncSelects();
       } catch (err) {
-        if (modelStatus) modelStatus.textContent = err.message;
+        if (el.modelStatus) el.modelStatus.textContent = err.message;
       }
     });
   }
 
-  if (modelSave) modelSave.addEventListener("click", saveManualModels);
-  if (modelReload) modelReload.addEventListener("click", loadSettings);
+  if (el.modelSave) el.modelSave.addEventListener("click", saveManualModels);
+  if (el.modelReload) el.modelReload.addEventListener("click", function () { guarded(loadSettings); });
+  if (el.manualModelDiscard) {
+    el.manualModelDiscard.addEventListener("click", function () {
+      guarded(function () {
+        manualDraft = savedModels.slice();
+        modelsDirty = false;
+        renderManualModels();
+        setBusy(false);
+        if (el.modelStatus) el.modelStatus.textContent = "已放弃未保存的修改。";
+      });
+    });
+  }
 
-  el.mgmtKey.addEventListener("input", function () {
-    manualDraft = [];
-    modelsLoaded = false;
-    modelsDirty = false;
-    renderManualModels();
-    setBusy(busy);
-    selects.refresh();
+  if (el.mgmtKey) {
+    el.mgmtKey.addEventListener("input", function () {
+      manualDraft = [];
+      modelsLoaded = false;
+      modelsDirty = false;
+      renderManualModels();
+      setBusy(busy);
+      syncSelects();
+    });
+  }
+
+  if (el.authForm) {
+    el.authForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      authenticate(el.mgmtKey ? el.mgmtKey.value : "", el.rememberLogin ? el.rememberLogin.checked : false, false);
+    });
+  }
+
+  if (el.importForm) {
+    el.importForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      importKeys();
+    });
+  }
+
+  if (el.reloadBtn) {
+    el.reloadBtn.addEventListener("click", function () {
+      refreshList();
+    });
+  }
+
+  var tabNames = ["keys", "models", "settings"];
+  tabNames.forEach(function (tab, index) {
+    var tabBtn = doc.querySelector("[data-tab='" + tab + "']");
+    if (!tabBtn) return;
+    tabBtn.addEventListener("click", function () {
+      if (tab === activeTab) return;
+      guarded(function () {
+        manualDraft = savedModels.slice();
+        modelsDirty = false;
+        renderManualModels();
+        selectTab(tab);
+      });
+    });
+    tabBtn.addEventListener("keydown", function (event) {
+      if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) < 0 || busy) return;
+      event.preventDefault();
+      var next = event.key === "Home" ? 0 : event.key === "End" ? 2 :
+        (index + (event.key === "ArrowRight" ? 1 : 2)) % 3;
+      var nextBtn = doc.querySelector("[data-tab='" + tabNames[next] + "']");
+      if (nextBtn) {
+        nextBtn.click();
+        if (!activeModal && nextBtn.focus) nextBtn.focus();
+      }
+    });
   });
 
-  el.authForm.addEventListener("submit", function (event) {
-    event.preventDefault();
-    refreshList();
+  [el.keysImport, el.keysEmptyImport].forEach(function (btn) {
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (!busy && currentKey()) {
+        if (el.importStatus) el.importStatus.textContent = "";
+        openModal(el.importModal, el.keys);
+      }
+    });
   });
 
-  el.importForm.addEventListener("submit", function (event) {
-    event.preventDefault();
-    importKeys();
+  [el.importClose, el.importCancel, el.quotaClose, el.quotaCloseFooter].forEach(function (button) {
+    button.addEventListener("click", function () { if (!busy) closeModal(); });
   });
-
-  el.reloadBtn.addEventListener("click", function () {
-    refreshList();
+  el.dirtyContinue.addEventListener("click", function () { guardAction = null; closeModal(); });
+  el.dirtyDiscard.addEventListener("click", function () {
+    var action = guardAction;
+    guardAction = null;
+    closeModal();
+    if (action) action();
+  });
+  el.logoutBtn.addEventListener("click", function () { guarded(function () { disconnect(); }); });
+  el.restoreForget.addEventListener("click", function () { if (!busy) disconnect(); });
+  el.restoreRetry.addEventListener("click", function () {
+    if (restored) authenticate(restored.key, restored.persistent, true);
+  });
+  el.toggleKeyVisibility.addEventListener("click", function () {
+    var visible = el.mgmtKey.type === "password";
+    el.mgmtKey.type = visible ? "text" : "password";
+    el.toggleKeyVisibility.setAttribute("aria-label", visible ? "隐藏密钥" : "显示密钥");
+    el.toggleKeyVisibility.setAttribute("aria-pressed", String(visible));
+  });
+  el.keysSearch.addEventListener("input", renderFilteredFiles);
+  el.keysStatusFilter.addEventListener("change", renderFilteredFiles);
+  el.keysModeFilter.addEventListener("change", renderFilteredFiles);
+  el.settingsRetry.addEventListener("click", function () { guarded(loadSettings); });
+  el.quotaRefresh.addEventListener("click", function () {
+    if (!selectedQuota || busy) return;
+    var selection = selectedQuota;
+    onQuotaClick({ currentTarget: { getAttribute: function (name) {
+      return name === "data-auth-index" ? selection.authIndex : selection.name;
+    } } });
+  });
+  [el.importModal, el.quotaModal, el.dirtyModal].forEach(function (modal) {
+    modal.addEventListener("click", function (event) {
+      if (!busy && event.target.getAttribute("data-modal-overlay")) closeModal();
+    });
+  });
+  doc.addEventListener("keydown", function (event) {
+    if (!activeModal || event.defaultPrevented || busy) return;
+    if (event.key === "Escape") { event.preventDefault(); closeModal(); return; }
+    if (event.key !== "Tab") return;
+    var controls = Array.from(activeModal.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex='0']"))
+      .filter(function (node) { return node.getClientRects().length > 0; });
+    if (!controls.length) return;
+    var first = controls[0], last = controls[controls.length - 1];
+    if (event.shiftKey && doc.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && doc.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
+  window.addEventListener("beforeunload", function (event) {
+    if (modelsDirty) { event.preventDefault(); event.returnValue = ""; }
   });
 
   applySecurityGate();
   selects.refresh();
   if (secureContext) {
-    setStatus("尚未加载。请输入 CPA 管理密钥并点击“连接并刷新”。", "info");
+    restored = credentials.read();
+    if (restored) {
+      el.rememberLogin.checked = restored.persistent;
+      authenticate(restored.key, restored.persistent, true);
+    }
   }
 }
 

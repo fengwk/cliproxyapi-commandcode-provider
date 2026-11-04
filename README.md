@@ -101,11 +101,21 @@ plugins:
 
 v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.register` / `plugin.reconfigure` 返回 `invalid config yaml`；全局和实例开关开启也无法解决。这同时会导致插件名称、可视化配置字段和管理菜单缺失。
 
-**v0.1.1 起已修复**：刷新插件商店，升级或重新安装当前版本 **v0.2.2**。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装当前版本，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
+**v0.1.1 起已修复**：刷新插件商店，升级或重新安装当前版本 **v0.3.0**。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装当前版本，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
 
 ## 导入 CommandCode 密钥
 
-密钥经插件管理路由导入，由宿主保存到 CPA `auth-dir`（默认 `0600`），**不写入 YAML、日志、URL 或浏览器存储**。
+上游密钥经插件管理路由导入，由宿主保存到 CPA `auth-dir`（默认 `0600`），**不写入 YAML、日志、URL 或浏览器存储**。
+
+首次进入独立登录页，输入 CPA 管理密钥。勾选“记住登录（仅限可信设备）”后，验证成功的
+管理密钥保存到本插件按 ID 和反向代理前缀隔离的 localStorage；不勾选使用 sessionStorage，
+存储不可用时退回页面内存并提示。下次打开仅校验一次；401 清除本插件的两处存储并返回登录，
+403 或网络/5xx 保留已存凭据并提供手动重试。设置页退出清除本插件会话，不读取宿主、
+Observer 或其它插件凭据；上游和客户端 API key 不进入浏览器存储。
+
+登录后为“密钥管理 / 手动模型 / 设置”三页；导入和配额按需打开弹窗。界面与 Observer
+保持相同中性主题，内嵌时隐藏重复品牌和主题控制，业务内容独立滚动、窄屏页签下移，避让
+CPA 右上悬浮操作条。CommandCode 的行级模式显式保存、点数配额和只读运行状态保持独立。
 
 - 管理界面（同源嵌入）：`GET /v0/resource/plugins/cliproxyapi-commandcode-provider/ui`
 - 列表：`GET .../keys` → `{files:[{name,auth_index,label,status,disabled,unavailable,success,failed,mode,mode_source,mode_error}]}`。`mode_source` 为 `auth`（记录内显式）或 `default`（采用 YAML 默认）。无法确定时 `mode=""`、`mode_source=""`、`mode_error=true`，不伪装成 `cli`；单条失败不阻断其他条目，响应不含 raw JSON、key 或路径。
@@ -233,6 +243,7 @@ make integration  # 真实宿主测试，必须设置 CPA_BINARY=/abs/path/cli-p
 ```
 
 - `make integration` 使用 `-tags=integration`，**要求** `CPA_BINARY` 指向真实 CPA v8 宿主二进制；缺失时**硬失败**（退出码 2），绝不静默跳过。
+- 浏览器回归：`python3 internal/web/browser/session-layout.py --report-dir /tmp/commandcode-ui-evidence`，使用生产资产/CSP、回环 mock 与合成凭据；Playwright 外部安装方式见该目录 README。
 - 集成矩阵：2 模式（`cli`/`provider`）× 3 客户端协议 × 3 模型家族 × 流式/非流式 = **36 cell**，并额外覆盖 header 顺序（raw TCP 抓包，不用 `httptest` 的 header map 当顺序证据）、usage/工具/reasoning、亲和与 429/402 故障转移、unsupported 语义零上游调用、ZDR 422 不降级、key 导入/重启/删除/quota、UTF-8/EOF/错误/取消/关停。
 - 每凭据混合模式集成覆盖：不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改及重启持久化、旧记录采用默认值且显式 mode 不受默认值改变、非法模式不发上游、外来 auth 禁止修改。
 - CI（`.github/workflows/ci.yml`）：`go vet` / `go test` / `go test -race` / Node UI 测试 / 三平台原生构建 / 真实宿主集成（`v8.0.23`，通过可复用 `real-host.yml`）。
@@ -241,5 +252,5 @@ make integration  # 真实宿主测试，必须设置 CPA_BINARY=/abs/path/cli-p
 ## 安全与许可证
 
 - 插件资源（`/ui`、`/ui.js`、`/ui.css`）无密钥、同源 CSP；管理 API 需管理密钥；列表绝不回显 key。
-- 不把 key 放进 YAML、URL、浏览器持久存储、日志或错误正文；不信任上游回显，错误文字去敏限长。
+- 不把上游/客户端 key 放进 YAML、URL、浏览器存储、日志或错误正文；只允许用户选择记住已验证的管理登录，不读取其它插件或宿主凭据。不信任上游回显，错误文字去敏限长。
 - 本仓库为 MIT 许可（见 `LICENSE`）；任何复制自参考实现的代码都按要求保留其版权与许可。

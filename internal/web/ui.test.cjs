@@ -1,4 +1,5 @@
 "use strict";
+require("./login.test.cjs");
 
 /*
  * Node built-in tests for CommandCode dependency-free UI helpers and flows.
@@ -530,8 +531,6 @@ test("manual models reject duplicate ids, invalid protocols, whitespace and over
 test("ui.js contains no storage, HTML-injection, eval or external-request primitives", () => {
   const source = readAsset("ui.js");
   for (const forbidden of [
-    "localStorage",
-    "sessionStorage",
     "document.cookie",
     "indexedDB",
     "innerHTML",
@@ -575,8 +574,8 @@ test("ui.html excludes sensitive controls from native form serialization", () =>
 
 test("ui.html shows CommandCode Provider display name and PluginID, without OpenCode leftovers", () => {
   const html = readAsset("ui.html");
-  assert.ok(html.includes("<title>CommandCode Provider · 密钥与配额管理</title>"));
-  assert.ok(html.includes("<h1>CommandCode Provider</h1>"));
+  assert.ok(html.includes("<title>CommandCode Provider · 密钥管理</title>"));
+  assert.ok(html.includes('class="brand-name">CommandCode Provider</p>'));
   assert.ok(html.includes("<code>cliproxyapi-commandcode-provider</code>"));
   assert.ok(html.includes("导入 CommandCode 密钥"));
 
@@ -604,7 +603,7 @@ test("all buttons use the shared .btn contract instead of type/table-specific st
   for (const declaration of [
     "display: inline-flex",
     "gap: 8px",
-    "min-height: 34px",
+    "min-height: 36px",
     "padding: 6px 12px",
     "border: 1px solid transparent",
     "background-color: var(--bg-secondary)",
@@ -616,7 +615,7 @@ test("all buttons use the shared .btn contract instead of type/table-specific st
     assert.ok(base.includes(declaration), "`.btn` must declare " + declaration);
   }
 
-  assert.match(rule(".btn-primary"), /background-color:\s*var\(--primary-color\)/);
+  assert.match(rule(".btn-primary"), /background-color:\s*var\(--action-primary-bg\)/);
   assert.match(rule(".btn-secondary"), /background-color:\s*var\(--bg-tertiary\)/);
   assert.match(rule(".btn-ghost"), /background-color:\s*transparent/);
   assert.match(rule(".btn-danger"), /background-color:\s*var\(--error-color\)/);
@@ -625,28 +624,32 @@ test("all buttons use the shared .btn contract instead of type/table-specific st
   assert.match(rule(".btn-sm"), /font-size:\s*12px/);
   assert.match(rule(".btn-sm"), /line-height:\s*20px/);
   assert.match(rule(".btn:disabled"), /opacity:\s*0\.6/);
-  assert.match(rule(".btn:focus-visible"), /outline:\s*2px solid var\(--text-primary\)/);
+  const focusRule = rule(".tab:focus-visible,\n.btn:focus-visible,\n.icon-button:focus-visible,\n.cpa-select-trigger:focus-visible,\ninput:focus-visible,\ntextarea:focus-visible");
+  assert.match(focusRule, /outline:\s*2px solid var\(--action-primary-bg\)/);
 
   assert.doesNotMatch(css, /button\[type="submit"\]/);
   assert.doesNotMatch(css, /button\.danger/);
   assert.doesNotMatch(css, /\.manual-model-table td button/);
 
   assert.match(
-    rule("a:focus-visible,\ninput:focus-visible,\ntextarea:focus-visible"),
-    /outline:\s*2px solid var\(--primary-color\)/
+    focusRule,
+    /outline:\s*2px solid var\(--action-primary-bg\)/
   );
 
-  const semantics = ["btn-primary", "btn-secondary", "btn-danger", "btn-ghost"];
-  const staticButtons = html.match(/<button\b[^>]*>/g) || [];
-  assert.equal(staticButtons.length, 6);
+  const semantics = ["btn-primary", "btn-secondary", "btn-danger", "btn-ghost", "btn-danger-outline"];
+  const allButtons = html.match(/<button\b[^>]*>/g) || [];
+  const staticButtons = allButtons.filter((tag) => /\bclass="btn /.test(tag));
+  assert.ok(staticButtons.length >= 15, "login, model and modal actions are present");
   for (const tag of staticButtons) {
     assert.match(tag, /class="btn [^"]+"/, "static button must carry .btn: " + tag);
-    assert.equal(semantics.filter((variant) => tag.includes(variant)).length, 1, "one variant: " + tag);
+    const classes = tag.match(/class="([^"]+)"/)[1].split(/\s+/);
+    assert.equal(semantics.filter((variant) => classes.includes(variant)).length, 1, "one variant: " + tag);
   }
 
   // Dynamic buttons in JS wire the shared classes
   assert.match(js, /quotaButton\.className = "btn btn-secondary btn-sm";/);
-  assert.equal((js.match(/className = "btn btn-danger btn-sm";/g) || []).length, 2);
+  assert.equal((js.match(/className = "btn btn-danger btn-sm";/g) || []).length, 1);
+  assert.match(js, /className = "btn btn-ghost btn-sm btn-danger-text";/);
 });
 
 /* ---------------------------------------------------------------- DOM Flows */
@@ -758,6 +761,9 @@ function createMockDom() {
       }
     };
     el.classList = {
+      add(name) { this.toggle(name, true); },
+      remove(name) { this.toggle(name, false); },
+      contains(name) { return el.className.split(/\s+/).includes(name); },
       toggle(name, force) {
         const parts = el.className ? el.className.split(/\s+/).filter(Boolean) : [];
         const has = parts.indexOf(name) >= 0;
@@ -802,6 +808,8 @@ function createMockDom() {
         if (!registry.has(id)) {
           const element = makeElement("div");
           element.id = id;
+          if (id === "keys-status-filter" || id === "keys-mode-filter") element.value = "all";
+          if (id === "remember-login") element.checked = true;
           body.appendChild(element);
           registry.set(id, element);
         }
@@ -1040,7 +1048,8 @@ test("quota query renders a monthly progress row with its source description", a
   );
 });
 
-test("quota auth failure (401/403) clears credentials and hides quota panel", async () => {
+// Invalid credentials and permission restrictions have different recovery paths.
+test("quota 401 logs out while 403 keeps the session and hides stale quota", async () => {
   for (const status of [401, 403]) {
     const { get, settle } = await mountUi({
       files: [{ name: "key.json", auth_index: "auth-1" }],
@@ -1052,7 +1061,13 @@ test("quota auth failure (401/403) clears credentials and hides quota panel", as
 
     assert.equal(get("mgmt-key").value, "");
     assert.equal(get("quota-panel").hidden, true);
-    assert.match(get("quota-status").textContent, new RegExp(String(status)));
+    if (status === 401) {
+      assert.match(get("login-error").textContent, /401/);
+      assert.equal(get("app-shell").hidden, true);
+    } else {
+      assert.match(get("quota-status").textContent, /403/);
+      assert.equal(get("app-shell").hidden, false);
+    }
   }
 });
 
@@ -1140,7 +1155,7 @@ test("off-loopback plaintext HTTP disables all management controls", async () =>
   assert.equal(get("mgmt-key").disabled, true);
   assert.equal(get("keys").disabled, true);
   assert.equal(get("label").disabled, true);
-  assert.equal(get("refresh-btn").disabled, true);
+  assert.equal(get("login-submit").disabled, true);
 });
 
 test("manual models draft adding, deletion and save lifecycle", async () => {
@@ -1157,20 +1172,20 @@ test("manual models draft adding, deletion and save lifecycle", async () => {
   const fetchImpl = async (url, init) => {
     if (url.includes("/validate")) {
       validateCalls.push(JSON.parse(init.body));
-      return { status: 200, ok: true, json: async () => ({ valid: true }) };
+      return { status: 200, ok: true, text: async () => '{"valid":true}' };
     }
     if (url.includes("/config") && init.method === "PATCH") {
       const body = JSON.parse(init.body);
       patchCalls.push(body);
       currentConfig["manual-models"] = body["manual-models"];
       currentSettings["manual-models"] = body["manual-models"];
-      return { status: 200, ok: true, json: async () => ({ ok: true }) };
+      return { status: 200, ok: true, text: async () => '{"ok":true}' };
     }
     if (url.includes("/config") && init.method === "GET") {
-      return { status: 200, ok: true, json: async () => currentConfig };
+      return { status: 200, ok: true, text: async () => JSON.stringify(currentConfig) };
     }
     if (url.includes("/settings")) {
-      return { status: 200, ok: true, json: async () => currentSettings };
+      return { status: 200, ok: true, text: async () => JSON.stringify(currentSettings) };
     }
     return { status: 200, ok: true, text: async () => JSON.stringify({ files: [] }), json: async () => ({ files: [] }) };
   };
@@ -1491,7 +1506,8 @@ test("save mode handles 400 invalid mode, 401/403 auth failure, and 500 error wi
     await settle();
 
     assert.equal(get("mgmt-key").value, "", "mgmt key must be cleared on 401");
-    assert.match(get("status").textContent, /401/);
+    assert.match(get("login-error").textContent, /401/);
+    assert.equal(get("app-shell").hidden, true);
   }
 
   // Case 3: 500 CPA error
@@ -1706,8 +1722,9 @@ test("a falsy 200 keys body (null/false/0) surfaces an error instead of stalling
     // Initial request: the very first GET returns the falsy body.
     {
       const { get } = await mountUi({ keysTextProvider: () => body });
-      assert.equal(get("status").className, "status error", body + ": initial falsy body must surface an error");
-      assert.doesNotMatch(get("status").textContent, /正在加载/, body + ": must not stall on the loading status");
+      assert.equal(get("login-error").hidden, false, body + ": initial falsy body must surface an error");
+      assert.equal(get("app-shell").hidden, true, body + ": unverified data must not enter management");
+      assert.doesNotMatch(get("login-error").textContent, /正在加载/, body + ": must not stall on the loading status");
       assert.doesNotMatch(get("status").textContent, /暂无已托管的密钥/, body + ": must not claim an empty directory");
       assert.equal(get("files-body").children.length, 0, body + ": must not render an empty placeholder row");
     }
@@ -1735,7 +1752,8 @@ test("a falsy 200 keys body (null/false/0) surfaces an error instead of stalling
 
 test("ui.html settings copy explicitly states per-credential override and default for legacy keys", () => {
   const html = readAsset("ui.html");
-  assert.ok(html.includes("每个凭据单独配置，下面是缺少mode旧凭据的默认值"));
+  assert.ok(html.includes("旧凭据未单独配置模式时使用上述默认值"));
+  assert.ok(html.includes("行级模式需在密钥管理中显式保存"));
 });
 
 // The visual select must commit through the native control and must not persist highlight classes.
