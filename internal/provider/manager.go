@@ -518,15 +518,11 @@ func (e *ProviderError) Error() string {
 	return e.Message
 }
 
-// upstreamError maps a non-2xx upstream status to a sanitized, status-preserving
-// error. The raw upstream body is never echoed.
+// upstreamError maps a non-2xx upstream status without inspecting the body.
+// Callers that already hold an inference error body use upstreamErrorWithBody so
+// a confirmed credit/quota exhaustion can be promoted to 402.
 func upstreamError(status int) error {
-	return &ProviderError{
-		Code:       "upstream_error",
-		Message:    "upstream returned status " + http.StatusText(status),
-		HTTPStatus: status,
-		Retryable:  status == http.StatusTooManyRequests || status >= 500,
-	}
+	return upstreamErrorWithBody(status, nil)
 }
 
 // resultError maps a handler error to an envelope result. Host- and upstream-

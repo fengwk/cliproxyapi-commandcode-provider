@@ -191,9 +191,15 @@ func writeWireResponse(conn net.Conn, resp wireResponse) {
 // failNext makes the next request whose body contains match fail with status.
 func (m *wireServer) failNext(match string, status int, code string) {
 	body, _ := json.Marshal(map[string]any{"error": map[string]any{"type": code, "message": "synthetic upstream failure"}})
+	m.failNextBody(match, status, string(body))
+}
+
+// failNextBody is failNext with an explicit response body so tests can exercise
+// upstream error classification without changing production code.
+func (m *wireServer) failNextBody(match string, status int, body string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.directives = append(m.directives, &mockDirective{match: match, status: status, contentType: "application/json", body: body})
+	m.directives = append(m.directives, &mockDirective{match: match, status: status, contentType: "application/json", body: []byte(body)})
 }
 
 // respondNext makes the next request whose body contains match return a custom

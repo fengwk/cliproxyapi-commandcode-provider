@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -462,7 +463,7 @@ func (m *Manager) executeProvider(p *plan, req rpcExecutorRequest) (pluginapi.Ex
 		return pluginapi.ExecutorResponse{}, errDo
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return pluginapi.ExecutorResponse{}, upstreamError(resp.StatusCode)
+		return pluginapi.ExecutorResponse{}, upstreamErrorWithBody(resp.StatusCode, resp.Body)
 	}
 	if !json.Valid(resp.Body) || !gjson.ParseBytes(resp.Body).IsObject() {
 		return pluginapi.ExecutorResponse{}, invalidUpstream("upstream response is not a JSON object")
@@ -553,13 +554,59 @@ func (m *Manager) openStream(key uint64, run chan struct{}, callbackID, method, 
 		return HTTPStreamStart{}, errStream
 	}
 	if start.StatusCode < 200 || start.StatusCode >= 300 {
+		var errBody []byte
+		if start.StatusCode == http.StatusBadRequest {
+			errBody = m.readStreamErrorBody(start)
+		}
 		m.bridge.HTTPStreamClose(start.StreamID)
-		return HTTPStreamStart{}, upstreamError(start.StatusCode)
+		return HTTPStreamStart{}, upstreamErrorWithBody(start.StatusCode, errBody)
 	}
 	if strings.TrimSpace(start.StreamID) == "" {
 		return HTTPStreamStart{}, invalidUpstream("upstream stream bridge unavailable")
 	}
 	return start, nil
+}
+
+// readStreamErrorBody reads the bounded JSON body of a rejected stream open so a
+// 400 credit exhaustion can be classified before the stream is closed. It only
+// reads when the host supplied a positive Content-Length within the cap; this
+// avoids blocking on an absent or unbounded body, in which case the caller keeps
+// the original status.
+func (m *Manager) readStreamErrorBody(start HTTPStreamStart) []byte {
+	if start.StreamID == "" {
+		return nil
+	}
+	contentType := strings.ToLower(strings.TrimSpace(start.Headers.Get("Content-Type")))
+	if contentType != "" && !strings.Contains(contentType, "json") {
+		return nil
+	}
+	rawLength := strings.TrimSpace(start.Headers.Get("Content-Length"))
+	if rawLength == "" {
+		return nil
+	}
+	length, errLength := strconv.Atoi(rawLength)
+	if errLength != nil || length <= 0 || length > maxQuotaErrorBody {
+		return nil
+	}
+	body := make([]byte, 0, length)
+	for len(body) < length {
+		chunk, errRead := m.bridge.HTTPStreamRead(start.StreamID)
+		if errRead != nil || chunk.Error != "" {
+			return nil
+		}
+		if len(chunk.Payload) > 0 {
+			remaining := length - len(body)
+			if len(chunk.Payload) > remaining {
+				body = append(body, chunk.Payload[:remaining]...)
+				break
+			}
+			body = append(body, chunk.Payload...)
+		}
+		if chunk.Done {
+			break
+		}
+	}
+	return body
 }
 
 // providerPump converts an arbitrary sequence of upstream SSE reads into
