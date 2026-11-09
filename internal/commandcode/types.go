@@ -17,6 +17,7 @@ type Capabilities struct {
 type RequestOptions struct {
 	Model           string
 	ThreadID        string
+	Identity        UpstreamIdentity
 	Now             time.Time
 	Capabilities    Capabilities
 	ReasoningEffort string
