@@ -36,8 +36,8 @@ GETTER = re.compile(r"get\s+" + IDENT + r"\s*\(")
 BOOL_NULL = re.compile(r"true|false|null")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9./:_%@+~-]*$")
 VERSION_PATTERN = re.compile(r"^\d+(\.\d+){1,3}$")
-HEX_ESCAPE = re.compile(r"\\x([0-9A-Fa-f]{2})")
-JS_ONLY_ESCAPES = (("\\'", "'"), ("\\v", "\\u000b"), ("\\0", "\\u0000"))
+STRING_TOKEN = re.compile(r'\\(?:x[0-9A-Fa-f]{2}|.)|"')
+JS_ONLY_ESCAPES = {"\\'": "'", "\\v": "\\u000b", "\\0": "\\u0000", '"': '\\"'}
 
 
 class ExtractError(Exception):
@@ -74,9 +74,14 @@ def _skip_braces(source: str, i: int, open_ch: str, close_ch: str) -> int:
 
 def _unescape(raw: str, offset: int) -> str:
     """Decode a string body as JSON after normalizing the few JS-only escapes."""
-    body = HEX_ESCAPE.sub(lambda m: "\\u00" + m.group(1), raw)
-    for js, json_escape in JS_ONLY_ESCAPES:
-        body = body.replace(js, json_escape)
+    def normalize(match):
+        token = match.group()
+        if token == "\\0" and raw[match.end():match.end() + 1].isdigit():
+            raise ExtractError(f"{offset}: legacy octal escape is not supported")
+        return "\\u00" + token[2:] if token.startswith("\\x") and len(token) == 4 else JS_ONLY_ESCAPES.get(token, token)
+    # Match whole escape tokens: an escaped backslash must never make the
+    # following literal x/u/v/0 into a new escape on a second replacement pass.
+    body = STRING_TOKEN.sub(normalize, raw)
     try:
         text = json.loads('"' + body + '"')
     except json.JSONDecodeError as exc:
@@ -144,8 +149,6 @@ def _parse_object(source: str, start: int, end: int, allow_objects: bool):
             i += 1
         elif c == "}":
             return props
-        elif c == "\"":
-            i = _skip_string(source, i, c)
         elif g := GETTER.match(source, i):
             # get hidden(){return!isXxx()}: runtime accessor, skipped and never
             # recorded; a parameterised getter is not a static fact.
@@ -168,6 +171,8 @@ def _parse_object(source: str, start: int, end: int, allow_objects: bool):
             if kind == "object" and not allow_objects:
                 raise ExtractError(f"{i}: nested object value for {key!r} is not a static fact")
             props.append((key, kind, value, value_start, j))
+            if source[j:end].lstrip()[:1] not in (",", "}"):
+                raise ExtractError(f"{j}: expected a comma or object close")
             i = j
     raise ExtractError(f"{start}: unterminated object literal")
 

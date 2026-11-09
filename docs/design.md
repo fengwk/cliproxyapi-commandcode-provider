@@ -2,6 +2,8 @@
 
 调研日期：2026-10-11。状态：设计与离线验证完成，**尚未实现或上线插件**。
 
+> 历史设计留档，以上状态与下文版本、UUIDv5/固定 workspace 描述不代表当前实现。v0.4.0 的实际行为以 [当前契约](contracts.md) 和 [发布说明](release-notes-v0.4.0.md) 为准。
+
 ## 1. 结论与设计约束
 
 新建独立 Go 原生插件 `cliproxyapi-commandcode-provider`，展示名 `CommandCode Provider`，provider 与公开模型前缀统一使用 `commandcode` / `commandcode/`。

@@ -13,7 +13,7 @@ import (
 	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/catalogdata"
 )
 
-// cliModel is one reviewed CLI 1.79.2 catalog entry. Every capability field is
+// cliModel is one reviewed CLI catalog entry. Every capability field is
 // optional because the source catalog omits unknown facts rather than encoding
 // a default.
 type cliModel struct {

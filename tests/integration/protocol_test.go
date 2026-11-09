@@ -85,13 +85,11 @@ func TestProtocolMatrix(t *testing.T) {
 							if stream && !obs.Terminal {
 								t.Errorf("stream cell did not reach a legitimate terminal")
 							}
+							h.wire.requireClean(t)
 						})
 					}
 				}
 			}
-			// All upstream contract checks (header order, models, thread ids)
-			// are reported once per host after the matrix has run.
-			h.wire.requireClean(t)
 		})
 	}
 	if cells != 36 {

@@ -10,8 +10,9 @@
 
 ```go
 func ValidateClientRequest(body []byte, protocol string, caps Capabilities) error
+func DeriveIdentity(apiKey, authID, canonicalSessionID string) (UpstreamIdentity, error)
 func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error)
-func RequestHeaders(key, threadID string, zdr bool) (http.Header, *pluginapi.HTTPWireProfile, error)
+func RequestHeaders(key string, identity UpstreamIdentity, zdr bool) (http.Header, *pluginapi.HTTPWireProfile, error)
 func NewDecoder(reader io.Reader, contentEncoding string) (*Decoder, error)
 func (d *Decoder) Next() (Event, error)
 func (d *Decoder) Close() error
@@ -22,9 +23,11 @@ func (r *Response) Completion() ([]byte, error)
 ```
 
 - `ValidateClientRequest` 检查原始 OpenAI Chat / Anthropic / Responses 请求，protocol 为 `openai`、`claude`、`openai-response` 或 SDK 别名 `codex`。拒绝无损转换不了的语义字段/part/tool；不主动取远端图片或文件。允许显式 auto tool choice、n=1、普通文本 response_format；固定 thinking budget 无法映射 effort 时返回明确不支持。
-- `BuildRequest` 只接受经过 SDK 转换的 Anthropic messages/tools/system；使用客户端的内容，不复制 CLI 系统提示词。ThreadID 必须有效 UUID。合成目录 `/workspace/cpa/cpa-project`，UTC 日期，空 Git metadata，`memory/taste/skills=null`，`permissionMode=standard`，params.stream 恒 true。max_tokens 默认 64000 并校验明确 cap；temperature/effort 仅合法时发出。省略顶层 mode/promptCache。
-- `RequestHeaders` 固定绑定 catalogdata.CLIVersion；按抓包提供 WireProfile，HTTP1Only+DisableAutoCompression。taste=false；ZDR opt-in；traceparent 随请求生成且不进入 body；Content-Type 采用当前抓包的合并值。
-- Decoder 是当前上游轮次的有界 NDJSON reader，支持 gzip/deflate/UTF8/CRLF/尾行。`Next` 返回经过验证的 Event；未知扩展事件可以跳过。EOF 前没有 finish/abort 时返回 typed 502；error/abort 返回 typed error。tool-result/providerExecuted 无法无损表达则明确不支持，不伪造客户端 call。
+- `DeriveIdentity` 是无状态纯函数，以选中 API key 派生 HMAC 根；按用途与分段 scope 派生 v4 格式稳定 ThreadID、凭据级 login 和项目候选，再按 auth/canonical session 选择项目。固定 64 项 login/项目池，每凭据 4～8 个唯一候选；不把 model/CLI 版本纳入身份。`UpstreamIdentity{ThreadID,WorkingDir,ProjectSlug}` 必须同时通过 v4/variant 和完整 cwd→slug 自洽校验。池项可碰撞，不代表真实机器。
+- `BuildRequest` 只接受经过 SDK 转换的 Anthropic messages/tools/system；使用客户端内容，不复制 CLI 系统提示词。`RequestOptions.Identity` 与 headers 共用，缺失即失败，不保留旧 ThreadID 接口。合成目录 `/home/<login>/proj/<project>`，UTC 日期，空 Git metadata，`memory/taste/skills=null`，`permissionMode=standard`，params.stream 恒 true。max_tokens 默认 64000 并校验明确 cap；temperature/effort 仅合法时发出。省略顶层 mode/promptCache。
+- string system 保持字符串，结构化 system 保留数组与显式 cache/TTL；空 text/reasoning 保留 `text:""`。wire JSON 关闭 HTML escaping，无尾换行，按转义边界输出字面 U+2028/U+2029，不破坏用户反斜杠；原始工具 JSON 数值与键序不经 float64 改写，不承诺任意输入与 JS 运行时逐字节相同。
+- `RequestHeaders` 绑定 catalogdata.CLIVersion=`1.88.5`；HTTP1Only+DisableAutoCompression，完整 profile 指定首位 `host`、末位 `content-length` 的小写及中间精确顺序，宿主管理其值。taste=false；ZDR opt-in；traceparent 随逻辑请求生成；Content-Type 保留 `application/json, application/json`，accept-encoding=`br, gzip, deflate`。只发单条 `connection: close`，承认与原生 keep-alive 不同。
+- Decoder 是当前上游轮次的有界 NDJSON reader，支持 br/gzip/deflate/UTF8/CRLF/尾行。解压后总量 64 MiB、单行 1 MiB；损坏 br 返回解码错误而非 EOF 成功。`Next` 返回经过验证的 Event；未知扩展事件可以跳过。EOF 前没有 finish/abort 时返回 typed 502；error/abort 返回 typed error。tool-result/providerExecuted 无法无损表达则明确不支持，不伪造客户端 call。
 - Decoder 按当前轮保存 cache-write/provider metadata 补充，finish 时交叉校验 usage，不重复加。finish 返回规范 Usage；冲突、负数、溢出不修正。无法证明缓存分区完整的数据不能伪造可定价桶，返回可识别 accounting error（首版 fail-closed）；无合法 usage 不能默认补全部 0 成功。
 - `Usage` 的 input/output 为 inclusive，cache read/write 为子集，reasoning 在 output 内。Complete 只在总量/分区自洽时成立。Add 防 int64 溢出，跨轮加一次。
 - Response 生成 canonical OpenAI Chat JSON/SSE：text、reasoning_content、function tool_calls、终止原因和完整 usage（含 cache_write_tokens、reasoning_tokens）。Apply 返回 **完整** SSE 帧 byte slices；不用半个 JSON chunk。pause_turn 的 finish 只累加 usage，不发成功 terminal，允许下一轮继续；最终普通 finish 发 stop/tool_calls/length、usage 与 [DONE]。Completion 只有真实完成后可调用，包含相同累计内容/usage。
@@ -39,9 +42,9 @@ func (r *Response) Completion() ([]byte, error)
 - 物理 auth JSON 可带根级 `mode`：`cli` 或 `provider`。这是人工配置，不检测套餐，也不在 403 或其他错误后切换。`model.for_auth` 与 execute 共用严格解析：最新 AuthMetadata > AuthAttributes > StorageJSON > 插件默认。显式存在但类型错误、空值或非法值失败关闭，不向后续来源降级；缺少字段才用下一来源。非法模式不发上游。
 - parseAuth 校验可选 mode，并保留到非秘密 Metadata；不把 mode 写入不可变 Attributes。executor 在 lookupFacts 前把所选模式绑定到当前请求的 config 副本。异步执行和 pause_turn 续跑使用该快照，不改共享配置。
 - manual-models 使用 `{id, protocol?, context-window?, max-output-tokens?, input-modalities?, reasoning-efforts?}`；protocol 是 openai/claude/openai-response。结构、字段和枚举严格校验，且不受默认模式限制。资格随当前凭据模式变化，publishedModels 与 lookupFacts 必须一致：Provider 缺少可证明 endpoint（手动 protocol 或当前目录的 chat endpoint）则不暴露、不执行；CLI 中显式声明非 text/image 输入的手动条目不暴露、不执行。CLI wire 本身不由 protocol 改变。
-- CLI 凭据发布嵌入 CLI/public 交集，默认 87 个，白名单和合格手动模型会改变数量；其余不自动暴露。Provider 凭据即使插件默认是 cli，也触发匿名公开目录刷新（不发送凭据、不选 key）并原子替换；失败保留 last-good 并标记 stale，不回退为空目录或 CLI。系统决策模型不能注册成聊天模型。`model.static` 继续提供默认模式目录作兼容展示，不参与凭据模式判定，也不扩大该凭据的模型集。
+- CLI 凭据发布嵌入 CLI/public 交集，默认 95 个（CLI 1.88.5 静态快照 110 项、公开快照 95 项），白名单和合格手动模型会改变数量；其余不自动暴露。版本/hash/date 与快照原子更新，离线提取工具不执行 bundle。Provider 凭据即使插件默认是 cli，也触发匿名公开目录刷新（不发送凭据、不选 key）并原子替换；失败保留 last-good 并标记 stale，不回退为空目录或 CLI。系统决策模型不能注册成聊天模型。`model.static` 继续提供默认模式目录作兼容展示，不参与凭据模式判定，也不扩大该凭据的模型集。
 - auth 导入/list/native parse/prepare/refresh 只读取请求选中的 auth，不自己选 key。CPA 负责按模型选凭据。
-- 只在所属 namespace 的 before-auth hook 将 x-commandcode-session 适配为 CPA affinity。UUIDv5 固定 namespace+JSON([scheme,selectedAuthID,canonicalSessionID])；header=threadID。模型 alias 仍由 CPA 管理。
+- 只在所属 namespace 的 before-auth hook 将 x-commandcode-session 适配为 CPA affinity；已有 affinity 优先。唯一会话权威是 CPA `canonical_session_id`，不对消息重新哈希。选中凭据+AuthID+canonical session 稳定派生身份，header session=body threadID；换 auth/key/session 隔离，不做旧 UUIDv5 迁移表。模型 alias 仍由 CPA 管理。
 - CLI 凭据：原始请求先 CLI Validate，然后公共 SDK → Anthropic 输入，再 BuildRequest；CLI Response 的 canonical Chat → 所需客户端协议，非流式与流式均经公开 SDK。执行前校验双向 transformer，防止双重转换。
 - Provider 凭据首选客户端原格式的 declared endpoint，否则采用确定性的可转换路由；HTTP/NDJSON 错误不做 CLI/provider fallback。
 - 流式 HTTP open + 有界读到首个可输出 frame/terminal 前置失败后才返回 RPC stream success。先存首帧而不在同步 RPC 中 emit（宿主无缓冲通道，防死锁），异步 worker再发。pause_turn 最多5次续跑，使用同一 body/auth/session/config 快照；不失败重试。
@@ -74,6 +77,8 @@ v0.3 起用户明确授权“记住管理登录”：仅验证成功的 CPA 管�
 ## 4. 验证与发布
 
 make test = go vet/test + node UI tests；race；native c-shared build；真实 CPA v8.0.23 本地 mock 三协议两 mode/stream 矩阵、wire order、quota、401/402/403/422/429/截断/取消/多 key 亲和。
+
+raw TCP 验收完整 HTTP/1.1 有序头、大小写、唯一 Connection、真实 body 长度；每个矩阵 cell 均校验，不能只检查最后一次请求。Brotli 覆盖三协议流/非流及 pause_turn，续跑 body/身份不变、usage 累加。Go TLS 与 Node/OpenSSL 不同；宿主不复用连接；不模拟遥测、其它端点序列或硬件身份。此处不承诺上游不可区分、缓存命中或真实计费。
 
 混合模式集成覆盖不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改及重启持久化、旧记录默认值、显式 mode 不受默认值改变、非法模式不发上游、foreign auth 禁止修改。
 

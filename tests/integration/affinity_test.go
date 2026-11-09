@@ -35,7 +35,7 @@ func threadIDOf(call wireRequest) string {
 
 // TestSessionAffinityStable proves the same canonical client session resolves to
 // the same upstream credential (no per-request key rotation) and, on the CLI
-// transport, the same UUIDv5 thread id.
+// transport, the same derived v4-format thread id.
 func TestSessionAffinityStable(t *testing.T) {
 	for _, mode := range []string{modeCLI, modeProvider} {
 		mode := mode

@@ -4,16 +4,21 @@ package integration
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 // wireServer is a raw-TCP synthetic upstream. Unlike net/http/httptest it does
@@ -51,6 +56,7 @@ type mockDirective struct {
 	path        string
 	status      int
 	contentType string
+	encoding    string
 	body        []byte
 	streaming   bool
 	truncate    bool
@@ -61,6 +67,7 @@ type mockDirective struct {
 type wireResponse struct {
 	Status      int
 	ContentType string
+	Encoding    string
 	Body        []byte
 	// Streaming writes the body in tiny chunks without Content-Length so the
 	// client must reassemble partial lines and multi-byte UTF-8 runes.
@@ -170,6 +177,9 @@ func writeWireResponse(conn net.Conn, resp wireResponse) {
 	if resp.ContentType != "" {
 		fmt.Fprintf(&head, "Content-Type: %s\r\n", resp.ContentType)
 	}
+	if resp.Encoding != "" {
+		fmt.Fprintf(&head, "Content-Encoding: %s\r\n", resp.Encoding)
+	}
 	head.WriteString("Connection: close\r\n")
 	if !resp.Streaming {
 		fmt.Fprintf(&head, "Content-Length: %d\r\n", len(resp.Body))
@@ -209,6 +219,25 @@ func (m *wireServer) respondNext(match, contentType, body string, streaming bool
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.directives = append(m.directives, &mockDirective{match: match, status: http.StatusOK, contentType: contentType, body: []byte(body), streaming: streaming})
+}
+
+// respondBrotli exercises the actual host HTTP bridge, not a decoder-only hook.
+func (m *wireServer) respondBrotli(t *testing.T, match string, body []byte) {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := brotli.NewWriter(&compressed)
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.directives = append(m.directives, &mockDirective{
+		match: match, status: http.StatusOK, contentType: "application/x-ndjson",
+		encoding: "br", body: compressed.Bytes(),
+	})
 }
 
 // truncateNext makes the next request whose body contains match return a stream
@@ -256,7 +285,7 @@ func (m *wireServer) route(req *wireRequest) wireResponse {
 		if d.truncate {
 			return truncatedResponse(req)
 		}
-		return wireResponse{Status: d.status, ContentType: d.contentType, Body: d.body, Streaming: d.streaming}
+		return wireResponse{Status: d.status, ContentType: d.contentType, Encoding: d.encoding, Body: d.body, Streaming: d.streaming}
 	}
 	switch {
 	case req.Method == http.MethodGet && req.Path == "/provider/v1/models":
@@ -373,6 +402,9 @@ func checkWireCall(c wireRequest) []string {
 
 func checkCLIGenerate(c wireRequest) []string {
 	var problems []string
+	if !bytes.HasPrefix(c.Raw, []byte("POST /alpha/generate HTTP/1.1\r\n")) || c.Query != "" {
+		problems = append(problems, "generate must use POST /alpha/generate HTTP/1.1 without a query")
+	}
 	var body struct {
 		ThreadID string `json:"threadId"`
 		Params   struct {
@@ -395,16 +427,19 @@ func checkCLIGenerate(c wireRequest) []string {
 	if !body.Params.Stream {
 		problems = append(problems, "params.stream must always be true for the generate transport")
 	}
-	if body.Config.WorkingDir != "/workspace/cpa/cpa-project" {
-		problems = append(problems, fmt.Sprintf("config.workingDir = %q, want the synthetic workspace", body.Config.WorkingDir))
+	if !cliWorkspacePattern.MatchString(body.Config.WorkingDir) {
+		problems = append(problems, fmt.Sprintf("config.workingDir = %q is not a legal synthetic workspace", body.Config.WorkingDir))
 	}
-	if !isUUIDv5(body.ThreadID) {
-		problems = append(problems, fmt.Sprintf("threadId %q is not a UUIDv5-derived id", body.ThreadID))
+	if got := headerValue(c, "x-project-slug"); got != strings.ReplaceAll(strings.TrimPrefix(body.Config.WorkingDir, "/"), "/", "-") {
+		problems = append(problems, "x-project-slug must derive from the complete config.workingDir")
+	}
+	if !isUUIDv4(body.ThreadID) {
+		problems = append(problems, fmt.Sprintf("threadId %q is not a v4-format id", body.ThreadID))
 	}
 	if got := headerValue(c, "x-session-id"); got != body.ThreadID {
 		problems = append(problems, fmt.Sprintf("x-session-id %q must equal body threadId %q", got, body.ThreadID))
 	}
-	if got := headerValue(c, "x-command-code-version"); got != "1.79.2" {
+	if got := headerValue(c, "x-command-code-version"); got != "1.88.5" {
 		problems = append(problems, fmt.Sprintf("x-command-code-version = %q, want the pinned CLI version", got))
 	}
 	if got := headerValue(c, "x-cli-environment"); got != "production" {
@@ -413,60 +448,82 @@ func checkCLIGenerate(c wireRequest) []string {
 	if got := headerValue(c, "x-taste-learning"); got != "false" {
 		problems = append(problems, fmt.Sprintf("x-taste-learning = %q, want false (privacy-preserving difference)", got))
 	}
-	if got := strings.ToLower(headerValue(c, "user-agent")); got != "cli" {
+	if got := headerValue(c, "user-agent"); got != "cli" {
 		problems = append(problems, fmt.Sprintf("User-Agent = %q, want cli", got))
 	}
 	if _, ok := bearerKey(c); !ok {
 		problems = append(problems, "Authorization Bearer credential is missing")
 	}
+	// Lock the complete ordinary envelope, including key order; no extra
+	// mode/promptCache/OAuth fields may slip into the wire fixture.
+	decoder := json.NewDecoder(bytes.NewReader(c.Body))
+	_, _ = decoder.Token()
+	var keys []string
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return append(problems, err.Error())
+		}
+		keys = append(keys, key.(string))
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return append(problems, err.Error())
+		}
+	}
+	if !slices.Equal(keys, []string{"config", "memory", "taste", "skills", "permissionMode", "threadId", "params"}) {
+		problems = append(problems, fmt.Sprintf("ordinary generate envelope keys = %v", keys))
+	}
 	problems = append(problems, checkCLIHeaderOrder(c)...)
 	return problems
 }
 
-// cliHeaderSequence is the pinned 1.79.2 wire order (the codec's
-// commandCodeHeaderProfile). "host" and "content-length" are omitted: the host
-// transport owns them and they may be interleaved anywhere.
+var cliWorkspacePattern = regexp.MustCompile(`^/home/[a-z]+/proj/[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// The complete 1.88.5 order is case-sensitive and includes host-owned fields.
+// The intentional host-policy difference is one connection: close, not native
+// keep-alive. TLS/connection reuse cannot be inferred from this HTTP fixture.
 var cliHeaderSequence = []string{
+	"host",
 	"connection",
 	"content-type",
-	"user-agent",
+	"User-Agent",
 	"x-command-code-version",
 	"x-cli-environment",
 	"x-project-slug",
 	"x-taste-learning",
 	"x-session-id",
-	"authorization",
+	"Authorization",
 	"x-cmd-zdr",
 	"traceparent",
 	"accept",
 	"accept-language",
 	"sec-fetch-mode",
 	"accept-encoding",
+	"content-length",
 }
-
-// cliOptionalHeaders may legitimately be absent (ZDR is opt-in).
-var cliOptionalHeaders = map[string]bool{"x-cmd-zdr": true}
 
 func checkCLIHeaderOrder(c wireRequest) []string {
 	var problems []string
-	lowered := make([]string, 0, len(c.HeaderOrder))
-	seen := map[string]bool{}
-	for _, name := range c.HeaderOrder {
-		lower := strings.ToLower(name)
-		lowered = append(lowered, lower)
-		seen[lower] = true
-	}
 	required := make([]string, 0, len(cliHeaderSequence))
 	for _, name := range cliHeaderSequence {
-		if cliOptionalHeaders[name] && !seen[name] {
+		if name == "x-cmd-zdr" && len(c.Header.Values(name)) == 0 {
 			continue
 		}
 		required = append(required, name)
+		if len(c.Header.Values(name)) != 1 {
+			problems = append(problems, name+" must occur exactly once")
+		}
 	}
-	if !orderedSubsequence(lowered, required) {
-		problems = append(problems, fmt.Sprintf("raw header order does not follow the pinned profile: %v", c.HeaderOrder))
+	if !slices.Equal(c.HeaderOrder, required) {
+		problems = append(problems, fmt.Sprintf("raw header order = %v, want exactly %v", c.HeaderOrder, required))
 	}
-	if got := strings.ToLower(headerValue(c, "content-type")); got != "application/json, application/json" {
+	if headerValue(c, "host") == "" || headerValue(c, "content-length") != strconv.Itoa(len(c.Body)) {
+		problems = append(problems, "host/content-length must match the actual authority/body")
+	}
+	if got := headerValue(c, "connection"); got != "close" {
+		problems = append(problems, fmt.Sprintf("connection = %q, want single close", got))
+	}
+	if got := headerValue(c, "content-type"); got != "application/json, application/json" {
 		problems = append(problems, fmt.Sprintf("content-type = %q, want the captured merged value", got))
 	}
 	if got := headerValue(c, "accept"); got != "*/*" {
@@ -478,8 +535,8 @@ func checkCLIHeaderOrder(c wireRequest) []string {
 	if got := headerValue(c, "sec-fetch-mode"); got != "cors" {
 		problems = append(problems, fmt.Sprintf("sec-fetch-mode = %q, want cors", got))
 	}
-	if got := strings.ToLower(headerValue(c, "accept-encoding")); got != "gzip, deflate" {
-		problems = append(problems, fmt.Sprintf("accept-encoding = %q, want gzip, deflate", got))
+	if got := headerValue(c, "accept-encoding"); got != "br, gzip, deflate" {
+		problems = append(problems, fmt.Sprintf("accept-encoding = %q, want br, gzip, deflate", got))
 	}
 	// A failure that asked for ZDR must send exactly the opt-in marker.
 	if got := headerValue(c, "x-cmd-zdr"); got != "" && got != "1" {
@@ -514,19 +571,6 @@ func checkProviderRequest(c wireRequest) []string {
 	return problems
 }
 
-// orderedSubsequence reports whether every entry of seq appears in observed in
-// the same relative order. Headers not listed in seq (host, connection, ...) are
-// ignored, which is why this is a subsequence rather than an equality check.
-func orderedSubsequence(observed, seq []string) bool {
-	i := 0
-	for _, o := range observed {
-		if i < len(seq) && o == seq[i] {
-			i++
-		}
-	}
-	return i == len(seq)
-}
-
 // headerValue returns the first value for a case-insensitive header name.
 func headerValue(c wireRequest, name string) string {
 	return c.Header.Get(name)
@@ -542,8 +586,8 @@ func bearerKey(c wireRequest) (string, bool) {
 	return strings.TrimSpace(raw[7:]), true
 }
 
-// isUUIDv5 reports whether s is a RFC 4122 version 5 UUID.
-func isUUIDv5(s string) bool {
+// isUUIDv4 checks both the version and RFC variant; derivation isn't randomness.
+func isUUIDv4(s string) bool {
 	if len(s) != 36 {
 		return false
 	}
@@ -559,5 +603,73 @@ func isUUIDv5(s string) bool {
 			}
 		}
 	}
-	return s[14] == '5'
+	return s[14] == '4' && strings.ContainsRune("89abAB", rune(s[19]))
+}
+
+// The golden checker itself must reject the old subsequence loopholes.
+func TestStrictCLIHeaderFixture(t *testing.T) {
+	base := wireRequest{Body: []byte("{}"), Header: http.Header{}}
+	for _, name := range cliHeaderSequence {
+		if name != "x-cmd-zdr" {
+			base.HeaderOrder = append(base.HeaderOrder, name)
+			base.Header.Set(name, "fixture")
+		}
+	}
+	for name, value := range map[string]string{
+		"host": "127.0.0.1", "content-length": "2", "connection": "close",
+		"content-type": "application/json, application/json", "accept": "*/*",
+		"accept-language": "*", "sec-fetch-mode": "cors", "accept-encoding": "br, gzip, deflate",
+	} {
+		base.Header.Set(name, value)
+	}
+	if problems := checkCLIHeaderOrder(base); len(problems) != 0 {
+		t.Fatalf("valid golden rejected: %v", problems)
+	}
+	for _, mutation := range []string{"extra", "duplicate", "casing", "order", "missing"} {
+		t.Run(mutation, func(t *testing.T) {
+			call := base
+			call.HeaderOrder = slices.Clone(base.HeaderOrder)
+			call.Header = base.Header.Clone()
+			switch mutation {
+			case "extra":
+				call.HeaderOrder = append(call.HeaderOrder, "x-extra")
+			case "duplicate":
+				call.HeaderOrder = append(call.HeaderOrder, "connection")
+				call.Header.Add("connection", "close")
+			case "casing":
+				call.HeaderOrder[3] = "user-agent"
+			case "order":
+				call.HeaderOrder[0], call.HeaderOrder[1] = call.HeaderOrder[1], call.HeaderOrder[0]
+			case "missing":
+				call.HeaderOrder = call.HeaderOrder[1:]
+			}
+			if len(checkCLIHeaderOrder(call)) == 0 {
+				t.Fatal("invalid complete wire profile was accepted")
+			}
+		})
+	}
+}
+
+// All client formats must consume Brotli upstream data, in buffered and
+// streamed execution, without changing the request fingerprint or usage.
+func TestBrotliClientProtocols(t *testing.T) {
+	h := newHarness(t, modeCLI)
+	if status, _ := h.importKeys(t, []string{keyAlpha}, "brotli"); status != http.StatusOK {
+		t.Fatal("import keys failed")
+	}
+	for _, client := range allClients() {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", client.name, stream), func(t *testing.T) {
+				session := fmt.Sprintf("brotli-%s-%t", client.name, stream)
+				h.wire.reset()
+				h.wire.respondBrotli(t, markerFor(session), cliGenerateNDJSON(familyChatResp))
+				obs := client.observe(t, h, familyChatResp, session, stream)
+				if obs.Text != fixtureText || (stream && !obs.Terminal) {
+					t.Errorf("incomplete decoded response: text=%q terminal=%t", obs.Text, obs.Terminal)
+				}
+				assertUsage(t, obs.Usage, expectedUsage("/alpha/generate", client.kind), "Brotli response")
+				h.wire.requireClean(t)
+			})
+		}
+	}
 }

@@ -114,6 +114,14 @@ class ToolCase(unittest.TestCase):
         )
         models = self.extract(bundle([hot] + base_entries(ENTRY_COUNT - 1, 1)))["models"]
         self.assertEqual(models[0]["name"], "Caf\u00e9 A \u4e2d \U0001F600 \t")
+        # Escape parity is semantic: JS "\\x41" is the literal text \x41.
+        for literal, expected in (
+            (r'"literal \\x41 \\v \\0"', r"literal \x41 \v \0"),
+            (r"""'single "quoted" and \'escaped\''""", """single "quoted" and 'escaped'"""),
+        ):
+            hot = entry(0).replace('"Model 0"', literal)
+            models = self.extract(bundle([hot] + base_entries(ENTRY_COUNT - 1, 1)))["models"]
+            self.assertEqual(models[0]["name"], expected)
 
     def test_unsupported_escapes_fail_closed(self):
         # Guessing would corrupt facts: JS-only/unknown escapes and bad hex are errors.

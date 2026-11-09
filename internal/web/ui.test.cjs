@@ -1071,27 +1071,35 @@ test("quota 401 logs out while 403 keeps the session and hides stale quota", asy
   }
 });
 
+// The settings page displays the backend version, never a bundled fallback.
 test("settings renders mode, CLI version, and stale catalog warning", async () => {
   const { get, settle } = await mountUi({
     settingsResponse: {
       status: 200,
       body: {
         mode: "cli",
-        cli_version: "1.79.2",
+        cli_version: "1.88.5",
         base_url: "https://api.commandcode.com",
         zdr: true,
-        catalog: { count: 87, source: "cli-snapshot", stale: true },
+        catalog: { count: 95, source: "cli-snapshot", stale: true },
         "manual-models": [{ id: "custom-claude", protocol: "claude" }]
       }
     }
   });
 
   assert.equal(get("setting-mode").textContent, "CLI 模式（默认）");
-  assert.equal(get("setting-cli-version").textContent, "1.79.2");
+  assert.equal(get("setting-cli-version").textContent, "1.88.5");
   assert.equal(get("setting-base-url").textContent, "https://api.commandcode.com");
   assert.equal(get("setting-zdr").textContent, "已开启");
-  assert.match(get("setting-catalog").textContent, /87 个模型/);
+  assert.match(get("setting-catalog").textContent, /95 个模型/);
   assert.equal(get("setting-stale").hidden, false);
+});
+
+test("settings missing CLI version is unknown rather than an invented version", async () => {
+  const { get } = await mountUi({
+    settingsResponse: { status: 200, body: { mode: "cli" } }
+  });
+  assert.equal(get("setting-cli-version").textContent, "未知");
 });
 
 test("quota query with no buckets renders no-buckets hint without error", async () => {

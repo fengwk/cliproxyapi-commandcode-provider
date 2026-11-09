@@ -140,7 +140,7 @@ type antImageSource struct {
 // It uses only client-provided content and no CLI system prompt. The upstream
 // identity is the sole caller input: threadId and config.workingDir both come
 // from the same validated UpstreamIdentity, so headers and the body can never
-// drift apart (no fallback to the legacy RequestOptions.ThreadID). max_tokens,
+// drift apart. max_tokens,
 // temperature and reasoning effort are validated before emission, and the body
 // is rendered with the native JSON.stringify-compatible wire encoder.
 func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) {

@@ -22,8 +22,8 @@ func testManager(mode Mode, manual ...ManualModel) *Manager {
 func TestPublishedModelsCLIModeIntersection(t *testing.T) {
 	m := testManager(ModeCLI)
 	models := m.publishedModels(m.config())
-	if len(models) != 87 {
-		t.Fatalf("cli mode must publish the reviewed 87-model intersection, got %d", len(models))
+	if len(models) != 95 {
+		t.Fatalf("cli mode must publish the reviewed 95-model intersection, got %d", len(models))
 	}
 	byID := map[string]bool{}
 	for _, model := range models {
@@ -65,7 +65,7 @@ func TestPublishedModelsCapabilities(t *testing.T) {
 func TestPublishedModelsProviderEmbeddedStale(t *testing.T) {
 	m := testManager(ModeProvider)
 	models := m.publishedModels(m.config())
-	if len(models) != 87 {
+	if len(models) != 95 {
 		t.Fatalf("provider mode must publish the embedded last-good snapshot, got %d", len(models))
 	}
 	info := m.catalogInfoForMode(m.config())

@@ -9,7 +9,7 @@
 
 > 本文档描述**已实现的插件契约**。除特别说明外，所有上游行为均以合成的本地 mock 验证，**没有对真实 CommandCode 服务做过生产验收**（见“与真实上游的验收状态”）。安装可使用插件商店或手动构建方式。
 
-> 每凭据模式从 **v0.2.0** 起提供；v0.1.1 不包含该功能。请在插件商店刷新并升级到 **v0.2.2**，保留既有配置与凭据。v0.2.2 修复协议终态、流中断及管理列表错误处理，详见 [发布说明](docs/release-notes-v0.2.2.md)。
+> 当前版本 **v0.4.0**：CLI 请求层对齐本地审计的 `cmd 1.88.5`，统一稳定身份与合成 workspace，增加 Brotli 支持，更新模型快照。保留既有配置与凭据，详见 [发布说明](docs/release-notes-v0.4.0.md)。这不代表 TLS 指纹相同或保证缓存命中。
 
 ## 职责边界
 
@@ -56,10 +56,10 @@ plugins:
 
 ```bash
 make build        # 产物 dist/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib}
-make package VERSION=0.2.2   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
+make package VERSION=0.4.0   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
 ```
 
-`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.2.2` 时归档为 `cliproxyapi-commandcode-provider_0.2.2_<goos>_<goarch>.zip`；不传则非 tag 本地构建使用 `0.2.0-dev+<short-sha>`。发布由 tag 决定版本。
+`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.4.0` 时归档为 `cliproxyapi-commandcode-provider_0.4.0_<goos>_<goarch>.zip`；不传则非 tag 本地构建使用 `0.4.0-dev+<short-sha>`。发布由 tag 决定版本。
 
 把动态库放到 `<plugins.dir>/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib,dll}`。注意 Linux 产物依赖 glibc，**不适用于 musl/Alpine**。
 
@@ -102,7 +102,7 @@ plugins:
 
 v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.register` / `plugin.reconfigure` 返回 `invalid config yaml`；全局和实例开关开启也无法解决。这同时会导致插件名称、可视化配置字段和管理菜单缺失。
 
-**v0.1.1 起已修复**：刷新插件商店，升级或重新安装当前版本 **v0.3.1**。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装当前版本，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
+**v0.1.1 起已修复**：刷新插件商店，升级或重新安装当前版本 **v0.4.0**。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装当前版本，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
 
 ## 导入 CommandCode 密钥
 
@@ -147,15 +147,17 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 ## 会话亲和与合成 workspace
 
 - 上游身份的唯一权威输入是 CPA metadata 的 `canonical_session_id`；插件仅把自己的模型上显式的 `x-commandcode-session` 适配为 CPA 亲和头，已有亲和头优先保留。插件**不对 body/prompt 做内容哈希**。
-- 上游 thread 身份：`uuid = UUIDv5(固定命名空间, JSON(["commandcode-session-v1", selectedAuthID, canonicalSessionID]))`。同一 auth + 同一会话稳定、跨重启不变；换凭据后上游 thread 随之隔离。
-- CLI 模式发送**合成 workspace**：`workingDir=/workspace/cpa/cpa-project`、`isGitRepo=false`、空 Git 字段、`memory/taste/skills=null`、`date` 为当前 UTC 日期、`params.stream` 恒为 `true`。插件不探测真实用户名、工作目录、Git 或文件内容，也不在宿主上创建该路径。
+- 上游 thread 是 **v4 格式稳定派生 UUID**：以选中凭据为秘密根，使用分段编码、用途隔离的 HMAC-SHA256，将 `AuthID + canonical_session_id` 映射为 UUID 并设置 version/variant 位。不是原生随机 UUID；同一凭据/auth/session 跨请求、跨重启稳定，换 key/auth/session 后隔离，不受模型或 CLI 版本影响。
+- CLI 模式发送**合成 workspace**：`workingDir=/home/<login>/proj/<project>`；固定 64 项 login 池、64 项项目池，每凭据稳定取 4～8 个不重复项目，由会话稳定选择。`x-project-slug` 从完整 workingDir 派生，header/body 共用一个身份对象。不同凭据允许共享池项。
+- `isGitRepo=false`、空 Git 字段、`memory/taste/skills=null`、每次逻辑请求取当前 UTC 日期、`params.stream` 恒为 `true`；pause_turn 续跑复用原身份和 body。插件不读取宿主工作目录/Git，也不创建这些路径。跨日请求日期可能改变，与长驻 CLI 的环境生命周期不同。
+- 请求保留双值 `Content-Type: application/json, application/json`、普通聊天省略 `mode`/`promptCache`；支持 `br, gzip, deflate`。字符串 system 保持字符串，结构化 system 和显式 cache/TTL 保留；JSON 不转义 HTML 或 U+2028/U+2029，保留工具原始数值与键序。
 - session affinity 只能减少换 key 与上下文波动，**不保证**上游缓存命中率。
 
 ## 模型路由
 
 CPA 仍按模型选凭据；插件不自建选 key 调度。`model.for_auth` 与执行使用同一套严格解析：最新 AuthMetadata > AuthAttributes > StorageJSON > YAML 默认。字段缺失才看下一来源；显式存在但类型错误、空值或非法则失败，不降级。执行前把所选模式绑定到**当前请求**的配置副本；异步执行和续跑沿用该快照，不改共享配置。
 
-- **CLI 凭据**：发布嵌入的 CLI/public 交集（默认 87 个，白名单与合格手动模型会改变数量）；上游 wire 不因客户端协议改变，均经 `/alpha/generate` NDJSON。CLI-only/别名条目需要显式 `manual-models` 注册。显式声明 text/image 以外输入的手动条目不发布、不执行。
+- **CLI 凭据**：基于审阅的 CLI `1.88.5` 110 模型快照和公开目录快照，发布交集（默认 95 个，白名单与合格手动模型会改变数量）；上游 wire 不因客户端协议改变，均经 `/alpha/generate` NDJSON。CLI-only/别名条目需要显式 `manual-models` 注册。显式声明 text/image 以外输入的手动条目不发布、不执行。
 - **Provider 凭据**：即使 YAML 默认是 `cli`，也会触发匿名 `GET <base-url>/provider/v1/models`（不携带凭据），并以当前目录的 `supported_endpoints` 路由：
   1. 模型声明了客户端原协议 → 直接用同协议 endpoint。
   2. 否则选择目录声明支持、且公共 SDK 已注册双向转换的确定性 endpoint。
@@ -211,6 +213,7 @@ Provider 模式原协议直通保留上游原生字段，例如 OpenAI Chat 原�
   因此插件只在**返回成功流之前**做有界 preflight 以便尽量走失败 envelope；一旦已输出内容，只发送明确的协议错误，绝不自行换 key 重放。
 - **Observer v0.4.4 不能“自动兼容”**：宿主转 `UsageRecord` 时丢弃 TokenBreakdown，且 `commandcode + executorAdapter` 对 Observer 的 SDK 是未知 provider → `unclassified`。**即使插件 payload 完全正确，当前 Observer 的非零价格仍会显示未定价**。要获得非零可定价成本，需按设计文档独立修改 Observer 增加精确 cohort（provider=`commandcode`、executor=`executorAdapter`、model namespace=`commandcode/`），**不修改 CPA 核心**；本仓库**不直接改 Observer**，该 cohort 更新仍待办。若保持 Observer v0.4.4 不变，只能承诺显示 token 与原始总量。
 - **合成 workspace 接受性**未知：是否影响上游 prompt/工具行为需要受控验证。
+- **不模拟完整原生网络指纹**：继续使用 CPA `host.http`。Go TLS ClientHello 不同于原生 Node/OpenSSL；宿主禁用连接复用，插件只发送一条 `connection: close`。不伪造 keep-alive，不引入 Node/uTLS/sidecar，不模拟遥测、其它端点序列或硬件身份。
 - **无真实 usage / TTL / 缓存政策验证**：结构稳定与 session affinity 是措施，命中率与扣费不能离线保证。
 - 未测试的 CPA 版本不做支持承诺。
 
@@ -244,8 +247,9 @@ make integration  # 真实宿主测试，必须设置 CPA_BINARY=/abs/path/cli-p
 ```
 
 - `make integration` 使用 `-tags=integration`，**要求** `CPA_BINARY` 指向真实 CPA v8 宿主二进制；缺失时**硬失败**（退出码 2），绝不静默跳过。
+- CLI 目录维护使用本地离线工具：`python3 scripts/extract-cli-catalog.py extract --bundle <cli.mjs> --package-json <package.json> --out <candidate.json> --date YYYY-MM-DD --diff internal/catalogdata/cli.json`；`check --bundle <cli.mjs> --snapshot internal/catalogdata/cli.json` 校验版本、SHA 与完整事实。只提取单一结构签名匹配的对象，不执行 JS，不在运行时追踪 npm 最新版本。
 - 浏览器回归：`python3 internal/web/browser/session-layout.py --report-dir /tmp/commandcode-ui-evidence`，使用生产资产/CSP、回环 mock 与合成凭据；Playwright 外部安装方式见该目录 README。
-- 集成矩阵：2 模式（`cli`/`provider`）× 3 客户端协议 × 3 模型家族 × 流式/非流式 = **36 cell**，并额外覆盖 header 顺序（raw TCP 抓包，不用 `httptest` 的 header map 当顺序证据）、usage/工具/reasoning、亲和与 429/402 故障转移、unsupported 语义零上游调用、ZDR 422 不降级、key 导入/重启/删除/quota、UTF-8/EOF/错误/取消/关停。
+- 集成矩阵：2 模式（`cli`/`provider`）× 3 客户端协议 × 3 模型家族 × 流式/非流式 = **36 cell**，并额外覆盖完整有序 HTTP 头（raw TCP 抓包，含 host/content-length 大小写，拒绝重复或额外头）、Brotli 三协议流/非流、压缩 pause_turn 身份/body 复用与 usage 累加、亲和与 429/402 故障转移、unsupported 语义零上游调用、ZDR 422 不降级、key 导入/重启/删除/quota、UTF-8/EOF/错误/取消/关停。
 - 每凭据混合模式集成覆盖：不同 auth 走不同 endpoint、Provider-only 模型只选 Provider auth、CLI-only 模型只选 CLI auth、热修改及重启持久化、旧记录采用默认值且显式 mode 不受默认值改变、非法模式不发上游、外来 auth 禁止修改。
 - CI（`.github/workflows/ci.yml`）：`go vet` / `go test` / `go test -race` / Node UI 测试 / 三平台原生构建 / 真实宿主集成（`v8.0.23`，通过可复用 `real-host.yml`）。
 - 发布**仅人工**：`.github/workflows/release.yml` 由人工 `vX.Y.Z` tag 或手动 `workflow_dispatch` 触发；仓库内**没有** auto-release、自动 push、自动合并或定时改代码的工作流。发布前对准确 tag 执行 test/race/static/真实宿主集成门禁，再原生构建三平台；核验 ZIP 内容、动态库架构、metadata 版本/SDK/提交及 SHA256 后，先建草稿、上传全部资产才正式发布，并使用 `gh release create --verify-tag`（从不创建 tag）。

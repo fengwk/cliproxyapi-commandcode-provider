@@ -1986,7 +1986,7 @@ function initUi() {
       el.settingMode.textContent = effectiveMode === "provider" ? "Provider 模式" : "CLI 模式（默认）";
     }
     if (el.settingCliVersion) {
-      el.settingCliVersion.textContent = toCellText(settings.cli_version) || "1.79.2";
+      el.settingCliVersion.textContent = toCellText(settings.cli_version) || "未知";
     }
     if (el.settingBaseUrl) {
       el.settingBaseUrl.textContent = toCellText(settings.base_url) || "默认";

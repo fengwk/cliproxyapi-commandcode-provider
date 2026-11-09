@@ -118,8 +118,8 @@ func TestSettingsReflectModeAndSchema(t *testing.T) {
 			if settings.Mode != mode {
 				t.Errorf("mode = %q, want %q", settings.Mode, mode)
 			}
-			if settings.CLIVersion != "1.79.2" {
-				t.Errorf("cli_version = %q, want the pinned 1.79.2", settings.CLIVersion)
+			if settings.CLIVersion != "1.88.5" {
+				t.Errorf("cli_version = %q, want the pinned 1.88.5", settings.CLIVersion)
 			}
 			if settings.ZDR {
 				t.Errorf("zdr = true, want false by default")
