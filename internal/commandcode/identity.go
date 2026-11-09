@@ -45,9 +45,9 @@ func DeriveIdentity(apiKey, authID, canonicalSessionID string) (UpstreamIdentity
 	workingDir := "/home/" + login + "/proj/" + project
 	slug, ok := workingDirSlug(workingDir)
 	if !ok {
-		// Unreachable while the pool entries stay in the restricted ASCII
-		// alphabet enforced by the pool tests; fail closed anyway because
-		// headers and body must consume one self-consistent identity.
+		// Unreachable while the pools stay in the slug alphabet; fail
+		// closed anyway so headers and body always get one self-consistent
+		// identity.
 		return UpstreamIdentity{}, invalidRequest("upstream workspace pool produced an invalid working directory")
 	}
 	identity := UpstreamIdentity{
@@ -56,8 +56,8 @@ func DeriveIdentity(apiKey, authID, canonicalSessionID string) (UpstreamIdentity
 		ProjectSlug: slug,
 	}
 	if err := identity.validate(); err != nil {
-		// Also unreachable for pool-driven identities; the shared boundary is
-		// verified once more because both wire builders consume the value.
+		// Also unreachable; re-check the shared boundary both wire builders
+		// consume.
 		return UpstreamIdentity{}, err
 	}
 	return identity, nil

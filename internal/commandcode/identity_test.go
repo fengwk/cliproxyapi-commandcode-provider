@@ -21,8 +21,8 @@ func TestDeriveIdentityStableVector(t *testing.T) {
 	}
 	want := UpstreamIdentity{
 		ThreadID:    "ade6e791-5f50-4a83-a5db-2db3e449edf8",
-		WorkingDir:  "/home/mira/proj/cloudside-api",
-		ProjectSlug: "home-mira-proj-cloudside-api",
+		WorkingDir:  "/home/mira/proj/falcon-config",
+		ProjectSlug: "home-mira-proj-falcon-config",
 	}
 	if identity.ThreadID != want.ThreadID {
 		t.Errorf("ThreadID = %q, want %q", identity.ThreadID, want.ThreadID)

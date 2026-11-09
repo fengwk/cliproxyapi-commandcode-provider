@@ -8,14 +8,11 @@ import "encoding/binary"
 // it, so ordinary version refreshes keep each credential's projects stable.
 const workspacePoolStamp = "commandcode-workspace-pool-v1"
 
-// The CLI fills its workspace facts from the user's real cwd, so the plugin
-// keeps a small synthetic environment instead of one fixed cave project: every
-// credential owns a plausible home login plus a fixed 4-8 candidate project
-// slice, and one session-stable pick inside that slice. Both pools below are
-// fixed, non-secret, lowercase ASCII payloads kept inside the restricted
-// alphabet of workingDirSlug. They claim workspaces, not real accounts:
-// sessions of different credentials may share an entry and no host lookup,
-// filesystem access or transliteration ever happens.
+// The CLI builds its workspace facts from the user's real cwd, so the plugin
+// keeps this fixed synthetic payload instead. Both pools are non-secret
+// lowercase ASCII inside the workingDirSlug alphabet; they claim plausible
+// workspaces, not real accounts, so credentials and sessions may share
+// entries, and no host lookup, filesystem access or transliteration happens.
 
 // workspaceLogins is the fixed pool of synthetic home login names (64 unique
 // entries, lowercase letters only).
@@ -68,42 +65,29 @@ func credentialWorkspace(root []byte, authID, canonical string) (login, project 
 	return login, credentialProject(root, candidates, authID, canonical)
 }
 
-// credentialLogin picks the credential-stable home login. The scope keeps the
-// auth id so one credential never shares a home with another under the same
-// key material.
+// credentialLogin picks the credential-stable home login. The finite pool can
+// collide for different credentials; identity isolation is carried by the
+// thread scope, not by unique home names.
 func credentialLogin(root []byte, authID string) string {
 	digest := identityDigest(root, "home-login", authID)
 	return workspaceLogins[digestChoice(digest, uint64(len(workspaceLogins)))]
 }
 
-// credentialCandidates derives the credential's fixed unique candidate slice
-// of project names. The pool digest seeds a fully specified splitmix64 walk
-// over the static 64-entry pool: a partial Fisher-Yates shuffle then keeps the
-// first candidateCount(digest[0]) names, so the slice is deterministic,
-// duplicate-free and stable across restarts without any runtime state.
+// credentialCandidates derives the credential's fixed 4-8 unique candidate
+// slice from one pool digest: a base entry plus an odd stride, walked over the
+// 64-entry pool. An odd stride is coprime with 64, so the walk never revisits
+// an entry inside a full cycle and the slice needs no duplicate check; the
+// derivation is deterministic and stateless.
 func credentialCandidates(root []byte, authID string) []string {
 	digest := identityDigest(root, "project-pool", workspacePoolStamp, authID)
-	rng := poolStream{state: binary.LittleEndian.Uint64(digest[1:9])}
-	order := make([]int, len(workspaceProjects))
-	for i := range order {
-		order[i] = i
-	}
-	for i := len(order) - 1; i > 0; i-- {
-		j := int(rng.next() % uint64(i+1))
-		order[i], order[j] = order[j], order[i]
-	}
-	size := candidateCount(digest[0])
+	base := digestChoice(digest, uint64(len(workspaceProjects)))
+	stride := 2*int(digest[8]%32) + 1 // odd 1..63, coprime with the pool size
+	size := credentialCandidateMin + int(digest[9])%(credentialCandidateMax-credentialCandidateMin+1)
 	names := make([]string, 0, size)
-	for _, index := range order[:size] {
-		names = append(names, workspaceProjects[index])
+	for i := 0; i < size; i++ {
+		names = append(names, workspaceProjects[(base+uint64(i*stride))%uint64(len(workspaceProjects))])
 	}
 	return names
-}
-
-// candidateCount turns the first pool-digest byte into the slice size inside
-// the fixed 4-8 range.
-func candidateCount(first byte) int {
-	return credentialCandidateMin + int(first)%5
 }
 
 // credentialProject selects the session-stable entry of the credential's
@@ -118,17 +102,4 @@ func credentialProject(root []byte, candidates []string, authID, canonical strin
 // over a 64-bit field is negligible for pool sizes of at most 64.
 func digestChoice(digest []byte, size uint64) uint64 {
 	return binary.LittleEndian.Uint64(digest[:8]) % size
-}
-
-// poolStream is the splitmix64 generator (Steele et al. 2014). It walks the
-// static pool deterministically; its output adds no key material of its own,
-// the randomness comes only from the seeded HMAC digest.
-type poolStream struct{ state uint64 }
-
-func (s *poolStream) next() uint64 {
-	s.state += 0x9e3779b97f4a7c15
-	z := s.state
-	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
-	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
-	return z ^ (z >> 31)
 }
