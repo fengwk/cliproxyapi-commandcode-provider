@@ -3,40 +3,52 @@ package commandcode
 import (
 	"strings"
 	"testing"
+
+	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/catalogdata"
 )
 
-// The header values and profile order are the reviewed 1.79.2 golden. host and
-// content-length are intentionally left to the host transport.
+// testIdentity is a fixed legal upstream identity shared by the header tests.
+// Headers must consume the unified identity, never DeriveIdentity of their own.
+var testIdentity = UpstreamIdentity{
+	ThreadID:    validUUID,
+	WorkingDir:  "/home/alex/proj/alpha-services",
+	ProjectSlug: "home-alex-proj-alpha-services",
+}
+
+// The header values and profile order are the reviewed 1.88.5 HTTPS golden.
+// host/content-length stay absent from the header map (host-owned values) while
+// the profile pins them at the first/last wire position; connection is a single
+// explicit close; accept-encoding declares the HTTPS br baseline.
 func TestRequestHeadersGolden(t *testing.T) {
-	header, profile, err := RequestHeaders("secret-key", validUUID, false)
+	header, profile, err := RequestHeaders("secret-key", testIdentity, false)
 	if err != nil {
 		t.Fatalf("RequestHeaders: %v", err)
 	}
 	expected := map[string]string{
-		"connection":             "keep-alive",
+		"connection":             "close",
 		"Content-Type":           "application/json, application/json",
 		"User-Agent":             "cli",
-		"x-command-code-version": "1.79.2",
+		"x-command-code-version": catalogdata.CLIVersion,
 		"x-cli-environment":      "production",
-		"x-project-slug":         "cpa-project",
+		"x-project-slug":         testIdentity.ProjectSlug,
 		"x-taste-learning":       "false",
-		"x-session-id":           validUUID,
+		"x-session-id":           testIdentity.ThreadID,
 		"Authorization":          "Bearer secret-key",
 		"accept":                 "*/*",
 		"accept-language":        "*",
 		"sec-fetch-mode":         "cors",
-		"accept-encoding":        "gzip, deflate",
+		"accept-encoding":        "br, gzip, deflate",
 	}
 	for key, want := range expected {
 		if got := header.Get(key); got != want {
 			t.Errorf("header %q = %q, want %q", key, got, want)
 		}
 	}
-	if got := header.Get("x-cmd-zdr"); got != "" {
-		t.Errorf("x-cmd-zdr = %q, want absent", got)
-	}
 	if header.Get("host") != "" || header.Get("content-length") != "" {
 		t.Errorf("host/content-length must be host-owned")
+	}
+	if got := header.Get("x-cmd-zdr"); got != "" {
+		t.Errorf("x-cmd-zdr = %q, want absent", got)
 	}
 	if got := header.Get("traceparent"); !strings.HasPrefix(got, "00-") || !strings.HasSuffix(got, "-01") || len(got) != 55 {
 		t.Errorf("traceparent = %q", got)
@@ -45,18 +57,23 @@ func TestRequestHeadersGolden(t *testing.T) {
 		t.Fatalf("wire profile = %+v", profile)
 	}
 	wantOrder := []string{
-		"connection", "content-type", "User-Agent", "x-command-code-version",
-		"x-cli-environment", "x-project-slug", "x-taste-learning", "x-session-id",
-		"Authorization", "x-cmd-zdr", "traceparent", "accept", "accept-language",
-		"sec-fetch-mode", "accept-encoding",
+		"host", "connection", "content-type", "User-Agent",
+		"x-command-code-version", "x-cli-environment", "x-project-slug",
+		"x-taste-learning", "x-session-id", "Authorization", "x-cmd-zdr",
+		"traceparent", "accept", "accept-language", "sec-fetch-mode",
+		"accept-encoding", "content-length",
 	}
-	if strings.Join(profile.HeaderProfile, ",") != strings.Join(wantOrder, ",") {
+	if got, want := strings.Join(profile.HeaderProfile, ","), strings.Join(wantOrder, ","); got != want {
 		t.Fatalf("header profile = %v, want %v", profile.HeaderProfile, wantOrder)
+	}
+	if profile.HeaderProfile[0] != "host" ||
+		profile.HeaderProfile[len(profile.HeaderProfile)-1] != "content-length" {
+		t.Fatalf("host/content-length must bracket the profile: %v", profile.HeaderProfile)
 	}
 }
 
 func TestRequestHeadersZDR(t *testing.T) {
-	header, _, err := RequestHeaders("secret-key", validUUID, true)
+	header, _, err := RequestHeaders("secret-key", testIdentity, true)
 	if err != nil {
 		t.Fatalf("RequestHeaders: %v", err)
 	}
@@ -65,11 +82,20 @@ func TestRequestHeadersZDR(t *testing.T) {
 	}
 }
 
-func TestRequestHeadersRejectsBadThread(t *testing.T) {
-	if _, _, err := RequestHeaders("k", "bad", false); err == nil {
+// A broken shared identity must be rejected before any header is built so a
+// caller cannot send a half-initialized thread/workspace upstream.
+func TestRequestHeadersRejectsBadIdentity(t *testing.T) {
+	badThread := testIdentity
+	badThread.ThreadID = "not-a-uuid"
+	if _, _, err := RequestHeaders("k", badThread, false); err == nil {
 		t.Fatalf("expected error for bad threadId")
 	}
-	if _, _, err := RequestHeaders("", validUUID, false); err == nil {
+	inconsistentSlug := testIdentity
+	inconsistentSlug.ProjectSlug = "alpha-services"
+	if _, _, err := RequestHeaders("k", inconsistentSlug, false); err == nil {
+		t.Fatalf("expected error for inconsistent workspace slug")
+	}
+	if _, _, err := RequestHeaders("", testIdentity, false); err == nil {
 		t.Fatalf("expected error for empty key")
 	}
 }
@@ -85,7 +111,7 @@ func TestRequestHeadersRejectsInjection(t *testing.T) {
 		"tab":          "abc\tdef",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := RequestHeaders(key, validUUID, false); err == nil {
+			if _, _, err := RequestHeaders(key, testIdentity, false); err == nil {
 				t.Fatalf("key %q must be rejected", key)
 			}
 		})

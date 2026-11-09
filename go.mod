@@ -3,6 +3,7 @@ module github.com/fengwk/cliproxyapi-commandcode-provider
 go 1.26.0
 
 require (
+	github.com/andybalholm/brotli v1.0.6
 	github.com/router-for-me/CLIProxyAPI/v8 v8.0.23
 	github.com/tidwall/gjson v1.20.0
 	github.com/tidwall/sjson v1.2.5
