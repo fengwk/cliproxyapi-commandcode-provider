@@ -11,9 +11,10 @@ import (
 )
 
 // Synthetic workspace facts. The plugin never reads the host filesystem, git
-// state, or machine identity; it sends a minimal fixed project description.
+// state, or machine identity. ProjectSlug stays here only until the header
+// slice consumes the same UpstreamIdentity; the body itself no longer fixes a
+// synthetic directory.
 const (
-	syntheticWorkingDir  = "/workspace/cpa/cpa-project"
 	syntheticProjectSlug = "cpa-project"
 	syntheticEnvironment = "linux"
 	defaultMaxTokens     = 64000
@@ -30,10 +31,12 @@ type cliOutput struct {
 }
 
 // cliBlock is the union of the wire content-block shapes. Only fields relevant
-// to Type are populated; omitempty keeps unrelated keys off the wire.
+// to Type are populated; omitempty keeps unrelated keys off the wire. Text is a
+// pointer so text and reasoning blocks always carry "text":"" when empty while
+// other kinds (tool calls, images, tool results) still omit the key.
 type cliBlock struct {
 	Type         string           `json:"type"`
-	Text         string           `json:"text,omitempty"`
+	Text         *string          `json:"text,omitempty"`
 	ToolCallID   string           `json:"toolCallId,omitempty"`
 	ToolName     string           `json:"toolName,omitempty"`
 	Input        json.RawMessage  `json:"input,omitempty"`
@@ -67,14 +70,18 @@ type cliConfig struct {
 }
 
 type cliParams struct {
-	Model           string       `json:"model"`
-	Messages        []cliMessage `json:"messages"`
-	Tools           []cliTool    `json:"tools"`
-	System          []cliBlock   `json:"system"`
-	MaxTokens       int64        `json:"max_tokens"`
-	Stream          bool         `json:"stream"`
-	Temperature     *float64     `json:"temperature,omitempty"`
-	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+	Model    string       `json:"model"`
+	Messages []cliMessage `json:"messages"`
+	Tools    []cliTool    `json:"tools"`
+	// System mirrors the native union: a flat string system stays a JSON
+	// string, while structured input keeps its text-block array form.
+	// Temperature holds the client's own JSON number token so its digits are
+	// never re-rendered through a float64.
+	System          any             `json:"system"`
+	MaxTokens       int64           `json:"max_tokens"`
+	Stream          bool            `json:"stream"`
+	Temperature     json.RawMessage `json:"temperature,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
 type cliRequest struct {
@@ -129,12 +136,16 @@ type antImageSource struct {
 	Data      string `json:"data"`
 }
 
-// BuildRequest converts a canonical Anthropic payload into the 1.79.2
-// /alpha/generate body. It uses only client-provided content and no CLI system
-// prompt, and validates ThreadID, max_tokens, temperature and reasoning effort.
+// BuildRequest converts a canonical Anthropic payload into the generate body.
+// It uses only client-provided content and no CLI system prompt. The upstream
+// identity is the sole caller input: threadId and config.workingDir both come
+// from the same validated UpstreamIdentity, so headers and the body can never
+// drift apart (no fallback to the legacy RequestOptions.ThreadID). max_tokens,
+// temperature and reasoning effort are validated before emission, and the body
+// is rendered with the native JSON.stringify-compatible wire encoder.
 func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) {
-	if !isValidUUID(opts.ThreadID) {
-		return nil, invalidRequest("threadId must be a canonical UUID")
+	if err := opts.Identity.validate(); err != nil {
+		return nil, err
 	}
 	if opts.Model == "" {
 		return nil, invalidRequest("model is required")
@@ -191,7 +202,10 @@ func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) 
 		if err != nil || temp < 0 || temp > 2 {
 			return nil, invalidRequest("temperature must be a number between 0 and 2")
 		}
-		params.Temperature = &temp
+		// The value has been validated; the token itself is forwarded so the
+		// client's exact digits (e.g. 1e-7) reach the wire unchanged instead of
+		// being re-rendered by a float64.
+		params.Temperature = json.RawMessage(string(*payload.Temperature))
 	}
 
 	if opts.ReasoningEffort != "" {
@@ -207,7 +221,7 @@ func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) 
 
 	req := cliRequest{
 		Config: cliConfig{
-			WorkingDir:    syntheticWorkingDir,
+			WorkingDir:    opts.Identity.WorkingDir,
 			Date:          now.UTC().Format("2006-01-02"),
 			Environment:   syntheticEnvironment,
 			Structure:     []string{},
@@ -221,11 +235,11 @@ func BuildRequest(anthropicPayload []byte, opts RequestOptions) ([]byte, error) 
 		Taste:          nil,
 		Skills:         nil,
 		PermissionMode: "standard",
-		ThreadID:       opts.ThreadID,
+		ThreadID:       opts.Identity.ThreadID,
 		Params:         params,
 	}
 
-	out, errMarshal := json.Marshal(req)
+	out, errMarshal := marshalWire(req)
 	if errMarshal != nil {
 		return nil, responseStateError("failed to serialize generate request")
 	}
@@ -256,7 +270,15 @@ func resolveMaxTokens(raw json.RawMessage, caps Capabilities) (int64, error) {
 	return chosen, nil
 }
 
-func buildSystem(raw json.RawMessage) ([]cliBlock, error) {
+// textPtr stores block text so the wire always carries the text field: the
+// native CLI keeps "text":"" for empty text/reasoning payloads, while tool
+// calls, images and tool results still omit the key entirely.
+func textPtr(text string) *string { return &text }
+
+// buildSystem keeps the client's system representation: a JSON string stays a
+// string on the wire and a structured input keeps its text-block array with
+// each block's cache marker and TTL. nil input is modeled as an empty array.
+func buildSystem(raw json.RawMessage) (any, error) {
 	blocks := []cliBlock{}
 	if len(raw) == 0 || string(raw) == "null" {
 		return blocks, nil
@@ -266,7 +288,7 @@ func buildSystem(raw json.RawMessage) ([]cliBlock, error) {
 		if err := json.Unmarshal(raw, &text); err != nil {
 			return nil, invalidRequest("system must be text or text blocks")
 		}
-		return []cliBlock{{Type: "text", Text: text}}, nil
+		return text, nil
 	}
 	var parts []antBlock
 	if err := json.Unmarshal(raw, &parts); err != nil {
@@ -276,7 +298,7 @@ func buildSystem(raw json.RawMessage) ([]cliBlock, error) {
 		if part.Type != "text" {
 			return nil, unsupported("system block type is not supported")
 		}
-		block := cliBlock{Type: "text", Text: part.Text}
+		block := cliBlock{Type: "text", Text: textPtr(part.Text)}
 		cc, err := parseCacheControl(part.CacheControl)
 		if err != nil {
 			return nil, err
@@ -348,9 +370,9 @@ func buildMessages(messages []antMessage, caps Capabilities) ([]cliMessage, erro
 				}
 				switch block.Type {
 				case "text":
-					wire = append(wire, cliBlock{Type: "text", Text: block.Text, CacheControl: cacheControl})
+					wire = append(wire, cliBlock{Type: "text", Text: textPtr(block.Text), CacheControl: cacheControl})
 				case "thinking":
-					wire = append(wire, cliBlock{Type: "reasoning", Text: block.Thinking, CacheControl: cacheControl})
+					wire = append(wire, cliBlock{Type: "reasoning", Text: textPtr(block.Thinking), CacheControl: cacheControl})
 				case "redacted_thinking":
 					return nil, unsupported("redacted_thinking cannot be represented")
 				case "tool_use":
@@ -377,7 +399,7 @@ func buildMessages(messages []antMessage, caps Capabilities) ([]cliMessage, erro
 				}
 				switch block.Type {
 				case "text":
-					userBlocks = append(userBlocks, cliBlock{Type: "text", Text: block.Text, CacheControl: cacheControl})
+					userBlocks = append(userBlocks, cliBlock{Type: "text", Text: textPtr(block.Text), CacheControl: cacheControl})
 				case "image":
 					img, err := buildImage(block.Source, caps)
 					if err != nil {

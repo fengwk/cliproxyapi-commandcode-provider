@@ -1,6 +1,7 @@
 package commandcode
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,6 +9,21 @@ import (
 )
 
 const validUUID = "6ae139ca-c1d9-4793-b78b-17a3888bf11c"
+
+// identityWorkingDir is the virtual workspace the identity carries; its slug
+// must match workingDirSlug so the shared identity validation accepts it.
+const identityWorkingDir = "/home/alex/proj/alpha-services"
+
+// testIdentity builds the self-consistent UpstreamIdentity tests send to the
+// builder. Request shaping must consume this value alone; there is no fallback
+// to the legacy RequestOptions.ThreadID field.
+func testIdentity(threadID string) UpstreamIdentity {
+	return UpstreamIdentity{
+		ThreadID:    threadID,
+		WorkingDir:  identityWorkingDir,
+		ProjectSlug: "home-alex-proj-alpha-services",
+	}
+}
 
 func mustBuild(t *testing.T, payload string, opts RequestOptions) map[string]any {
 	t.Helper()
@@ -22,17 +38,18 @@ func mustBuild(t *testing.T, payload string, opts RequestOptions) map[string]any
 	return obj
 }
 
-// The synthesized config is fixed and must never leak machine or git state.
-func TestBuildRequestSyntheticConfig(t *testing.T) {
+// The request config is identity-driven and otherwise fixed: it must never
+// leak machine or git state, and legacy ThreadID-only options must fail closed.
+func TestBuildRequestIdentityConfig(t *testing.T) {
 	obj := mustBuild(t, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, RequestOptions{
 		Model:    "native/m",
-		ThreadID: validUUID,
+		Identity: testIdentity(validUUID),
 		Now:      time.Date(2026, 10, 11, 5, 0, 0, 0, time.UTC),
 	})
 
 	config := obj["config"].(map[string]any)
-	if config["workingDir"] != syntheticWorkingDir {
-		t.Errorf("workingDir = %v", config["workingDir"])
+	if config["workingDir"] != identityWorkingDir {
+		t.Errorf("workingDir = %v, want the identity workspace", config["workingDir"])
 	}
 	if config["date"] != "2026-10-11" {
 		t.Errorf("date = %v", config["date"])
@@ -49,7 +66,10 @@ func TestBuildRequestSyntheticConfig(t *testing.T) {
 		t.Errorf("permissionMode = %v", obj["permissionMode"])
 	}
 	if obj["threadId"] != validUUID {
-		t.Errorf("threadId = %v", obj["threadId"])
+		t.Errorf("threadId = %v, want the identity thread", obj["threadId"])
+	}
+	if params := obj["params"].(map[string]any); len(params["system"].([]any)) != 0 {
+		t.Errorf("system = %v, want an empty array when the client omits it", params["system"])
 	}
 	for _, key := range []string{"mode", "promptCache"} {
 		if _, exists := obj[key]; exists {
@@ -60,8 +80,8 @@ func TestBuildRequestSyntheticConfig(t *testing.T) {
 	if params["stream"] != true {
 		t.Errorf("stream = %v", params["stream"])
 	}
-	if params["max_tokens"].(float64) != defaultMaxTokens {
-		t.Errorf("max_tokens = %v", params["max_tokens"])
+	if got := params["max_tokens"].(float64); got != defaultMaxTokens {
+		t.Errorf("max_tokens = %v, want the %d default", got, defaultMaxTokens)
 	}
 	if _, exists := params["reasoning_effort"]; exists {
 		t.Errorf("reasoning_effort should be omitted when unset")
@@ -71,8 +91,36 @@ func TestBuildRequestSyntheticConfig(t *testing.T) {
 	}
 }
 
-// BuildRequest maps every supported block: system cache_control, inline image,
-// assistant reasoning and tool-call, tool-result history and tools.
+// The builder must not fall back to the legacy ThreadID option in either
+// direction: the identity value wins on the wire even when it disagrees with
+// the legacy field, and a legacy-only call is rejected instead of silently used.
+func TestBuildRequestConsumesIdentityOnly(t *testing.T) {
+	legacy := "00000000-0000-7000-8000-000000000000"
+	body, err := BuildRequest([]byte(`{"model":"m","messages":[]}`), RequestOptions{
+		Model:    "native/m",
+		ThreadID: legacy,
+		Identity: testIdentity(validUUID),
+	})
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"threadId":"`+validUUID+`"`)) {
+		t.Fatalf("body must carry the identity threadId: %s", body)
+	}
+	if bytes.Contains(body, []byte("00000000-")) {
+		t.Fatalf("legacy ThreadID leaked into the body: %s", body)
+	}
+	if _, err := BuildRequest([]byte(`{"model":"m","messages":[]}`), RequestOptions{
+		Model:    "native/m",
+		ThreadID: validUUID,
+	}); err == nil {
+		t.Fatalf("legacy ThreadID-only options must fail closed, not act as fallback")
+	}
+}
+
+// BuildRequest maps every supported block: structured system with cache
+// markers, inline image, assistant reasoning and tool-call, tool-result
+// history and tools.
 func TestBuildRequestMessageMapping(t *testing.T) {
 	payload := `{
 	  "model":"native/m",
@@ -88,7 +136,7 @@ func TestBuildRequestMessageMapping(t *testing.T) {
 	}`
 	obj := mustBuild(t, payload, RequestOptions{
 		Model:           "native/m",
-		ThreadID:        validUUID,
+		Identity:        testIdentity(validUUID),
 		Capabilities:    Capabilities{Vision: true, ReasoningEfforts: []string{"low", "high"}, MaxOutputTokens: 64000},
 		ReasoningEffort: "high",
 	})
@@ -161,16 +209,53 @@ func TestBuildRequestMessageMapping(t *testing.T) {
 	}
 }
 
+// The wire stays a JSON string when the client sent a string system; only
+// structured input keeps the text-block array, preserving its segments and
+// cache markers.
+func TestBuildRequestSystemUnion(t *testing.T) {
+	stringObj := mustBuild(t, `{"model":"m","system":"whole system","messages":[]}`, RequestOptions{
+		Model:    "native/m",
+		Identity: testIdentity(validUUID),
+	})
+	if got := stringObj["params"].(map[string]any)["system"]; got != "whole system" {
+		t.Fatalf("string system = %v (%T), want the same JSON string", got, got)
+	}
+
+	arrayObj := mustBuild(t, `{"model":"m","system":[{"type":"text","text":"a"},{"type":"text","text":"b","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[]}`, RequestOptions{
+		Model:    "native/m",
+		Identity: testIdentity(validUUID),
+	})
+	system, ok := arrayObj["params"].(map[string]any)["system"].([]any)
+	if !ok || len(system) != 2 {
+		t.Fatalf("structured system = %v, want a two-block array", arrayObj["params"].(map[string]any)["system"])
+	}
+	if system[0].(map[string]any)["text"] != "a" {
+		t.Fatalf("first system segment = %v", system[0])
+	}
+	second := system[1].(map[string]any)
+	if second["text"] != "b" {
+		t.Fatalf("second system segment = %v", second)
+	}
+	if cc := second["cache_control"].(map[string]any); cc["type"] != "ephemeral" || cc["ttl"] != "5m" {
+		t.Fatalf("second segment cache_control = %v", cc)
+	}
+}
+
 func TestBuildRequestRejects(t *testing.T) {
-	base := RequestOptions{Model: "native/m", ThreadID: validUUID}
+	base := RequestOptions{Model: "native/m", Identity: testIdentity(validUUID)}
 	cases := map[string]struct {
 		payload string
 		opts    RequestOptions
 		code    string
 	}{
-		"bad uuid": {
+		"bad identity uuid": {
 			payload: `{"model":"m","messages":[]}`,
-			opts:    RequestOptions{Model: "native/m", ThreadID: "not-a-uuid"},
+			opts:    RequestOptions{Model: "native/m", Identity: UpstreamIdentity{ThreadID: "not-a-uuid", WorkingDir: "/home/a/b", ProjectSlug: "home-a-b"}},
+			code:    CodeInvalidRequest,
+		},
+		"identity workspace slug mismatch": {
+			payload: `{"model":"m","messages":[]}`,
+			opts:    RequestOptions{Model: "native/m", Identity: UpstreamIdentity{ThreadID: validUUID, WorkingDir: "/home/a/b", ProjectSlug: "other-name"}},
 			code:    CodeInvalidRequest,
 		},
 		"missing name": {
@@ -195,12 +280,12 @@ func TestBuildRequestRejects(t *testing.T) {
 		},
 		"effort unsupported": {
 			payload: `{"model":"m","messages":[]}`,
-			opts:    RequestOptions{Model: "native/m", ThreadID: validUUID, ReasoningEffort: "high", Capabilities: Capabilities{ReasoningEfforts: []string{"low"}}},
+			opts:    RequestOptions{Model: "native/m", Identity: testIdentity(validUUID), ReasoningEffort: "high", Capabilities: Capabilities{ReasoningEfforts: []string{"low"}}},
 			code:    CodeReasoningEffort,
 		},
 		"max_tokens above cap": {
 			payload: `{"model":"m","messages":[],"max_tokens":9000}`,
-			opts:    RequestOptions{Model: "native/m", ThreadID: validUUID, Capabilities: Capabilities{MaxOutputTokens: 8000}},
+			opts:    RequestOptions{Model: "native/m", Identity: testIdentity(validUUID), Capabilities: Capabilities{MaxOutputTokens: 8000}},
 			code:    CodeInvalidRequest,
 		},
 		"non object payload": {
@@ -233,7 +318,7 @@ func TestBuildRequestRejects(t *testing.T) {
 func TestBuildRequestClampsDefaultToCap(t *testing.T) {
 	obj := mustBuild(t, `{"model":"m","messages":[]}`, RequestOptions{
 		Model:        "native/m",
-		ThreadID:     validUUID,
+		Identity:     testIdentity(validUUID),
 		Capabilities: Capabilities{MaxOutputTokens: 4096},
 	})
 	if got := obj["params"].(map[string]any)["max_tokens"].(float64); got != 4096 {
@@ -249,7 +334,7 @@ func TestBuildRequestCacheControlTTL(t *testing.T) {
 	  "system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"1h"}}],
 	  "messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]
 	}`
-	obj := mustBuild(t, payload, RequestOptions{Model: "native/m", ThreadID: validUUID})
+	obj := mustBuild(t, payload, RequestOptions{Model: "native/m", Identity: testIdentity(validUUID)})
 	params := obj["params"].(map[string]any)
 
 	sys := params["system"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)
@@ -265,7 +350,53 @@ func TestBuildRequestCacheControlTTL(t *testing.T) {
 
 func TestBuildRequestRejectsIllegalTTL(t *testing.T) {
 	payload := `{"model":"m","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"2h"}}],"messages":[]}`
-	if _, err := BuildRequest([]byte(payload), RequestOptions{Model: "native/m", ThreadID: validUUID}); err == nil {
+	if _, err := BuildRequest([]byte(payload), RequestOptions{Model: "native/m", Identity: testIdentity(validUUID)}); err == nil {
 		t.Fatalf("illegal cache_control ttl must be rejected")
+	}
+}
+
+// The wire encoding must match the native JSON.stringify shape byte for byte
+// on the plugin-controllable parts: no HTML escaping, literal U+2028
+// separators, preserved user literals like a written-out "\u2028", empty
+// text/reasoning payloads kept as "text":"", the client's own number tokens
+// verbatim (temperature 1e-9, raw tool numbers, >float64 precision) and no
+// trailing newline.
+func TestBuildRequestJSONWireEncoding(t *testing.T) {
+	sep := string(rune(0x2028))
+	payload := `{
+	  "model":"m",
+	  "system":"first <b>&",
+	  "messages":[
+	    {"role":"assistant","content":[{"type":"thinking","thinking":""},{"type":"tool_use","id":"t1","name":"write","input":{"nums":[1e-7,9007199254740993],"order":"z"}}]},
+	    {"role":"user","content":[
+	      {"type":"text","text":""},
+	      {"type":"text","text":"sep` + sep + `here"},
+	      {"type":"text","text":"\\u2028 literal"},
+	      {"type":"text","text":"\\` + sep + `pair","cache_control":{"type":"ephemeral"}}
+	    ]}
+	  ],
+	  "temperature":1e-9
+	}`
+	out, err := BuildRequest([]byte(payload), RequestOptions{
+		Model:    "native/m",
+		Identity: testIdentity(validUUID),
+		Now:      time.Date(2026, 10, 11, 5, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+
+	want := `{"config":{"workingDir":"/home/alex/proj/alpha-services","date":"2026-10-11","environment":"linux","structure":[],"isGitRepo":false,"currentBranch":"","mainBranch":"","gitStatus":"","recentCommits":[]},` +
+		`"memory":null,"taste":null,"skills":null,"permissionMode":"standard","threadId":"` + validUUID + `",` +
+		`"params":{"model":"native/m","messages":[` +
+		`{"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"tool-call","toolCallId":"t1","toolName":"write","input":{"nums":[1e-7,9007199254740993],"order":"z"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":""},` +
+		`{"type":"text","text":"sep` + sep + `here"},` +
+		`{"type":"text","text":"\\u2028 literal"},` +
+		`{"type":"text","text":"\\` + sep + `pair","cache_control":{"type":"ephemeral"}}]}],` +
+		`"tools":[],"system":"first <b>&","max_tokens":64000,"stream":true,"temperature":1e-9}}`
+
+	if !bytes.Equal(out, []byte(want)) {
+		t.Fatalf("wire bytes mismatch:\n got: %s\nwant: %s", out, want)
 	}
 }
