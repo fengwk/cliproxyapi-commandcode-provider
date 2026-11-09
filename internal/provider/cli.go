@@ -64,6 +64,16 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	if err := commandcode.ValidateClientRequest(p.original, p.clientReq.String(), caps); err != nil {
 		return localError(err)
 	}
+	effort := reasoningEffort(req.Metadata, p.clientReq, p.original)
+	if p.clientReq == translator.FormatOpenAI {
+		// Consume the compatibility control before SDK translation. Check the
+		// effective host effort too so metadata cannot reverse disabled thinking.
+		var err error
+		effort, err = commandcode.ResolveChatThinking(json.RawMessage(gjson.GetBytes(p.original, "thinking").Raw), effort, caps)
+		if err != nil {
+			return localError(err)
+		}
+	}
 	anthropic, errTranslate := toAnthropic(p.clientReq, p.native, p.original)
 	if errTranslate != nil {
 		return errTranslate
@@ -74,7 +84,7 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 		Identity:        identity,
 		Now:             time.Now().UTC(),
 		Capabilities:    caps,
-		ReasoningEffort: reasoningEffort(req.Metadata, p.clientReq, p.original),
+		ReasoningEffort: effort,
 	})
 	if errBuild != nil {
 		return localError(errBuild)
@@ -112,7 +122,7 @@ func unsupportedTranslation() error {
 
 // reasoningEffort resolves the reasoning effort the host metadata declares, or
 // falls back to the validated client body's protocol-specific field. The CLI
-// builder drops any effort the model does not legitimately support.
+// builder rejects any effort the model does not legitimately support.
 func reasoningEffort(metadata map[string]any, client translator.Format, original []byte) string {
 	if client == translator.FormatClaude && gjson.GetBytes(original, "thinking.type").String() == "disabled" {
 		return "none"

@@ -261,6 +261,53 @@ func TestReasoningEffortPrefersMetadataThenBody(t *testing.T) {
 	}
 }
 
+// The compatibility control must reach the actual builder, not just pass
+// validation; host metadata must not reverse an explicit thinking switch.
+func TestPrepareCLIChatThinking(t *testing.T) {
+	for _, tc := range []struct {
+		name, controls, metadata, want string
+		reject                         bool
+	}{
+		{"pi max", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "", "max", false},
+		{"disabled", `"thinking":{"type":"disabled"}`, "", "off", false},
+		{"metadata overrides effort", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "high", "high", false},
+		{"metadata conflicts with disabled", `"thinking":{"type":"disabled"}`, "max", "", true},
+		{"metadata conflicts with enabled", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "off", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &plan{
+				native: "deepseek/deepseek-v4.1-flash", key: "fake-key",
+				clientReq: translator.FormatOpenAI, clientResp: translator.FormatOpenAI,
+				facts:    modelFacts{efforts: []string{"off", "high", "max"}},
+				original: []byte(`{"model":"commandcode/deepseek/deepseek-v4.1-flash","max_tokens":128000,"messages":[{"role":"user","content":"hi"}],` + tc.controls + `}`),
+			}
+			metadata := map[string]any{"canonical_session_id": "pi-session"}
+			if tc.metadata != "" {
+				metadata["reasoning_effort"] = tc.metadata
+			}
+			req := rpcExecutorRequest{}
+			req.AuthID, req.Model, req.Metadata = "fake-auth", modelPrefix+p.native, metadata
+			err := p.prepareCLI(req)
+			if tc.reject {
+				var provErr *ProviderError
+				if !errors.As(err, &provErr) || provErr.HTTPStatus != 400 || !strings.Contains(provErr.Message, "conflicts") {
+					t.Fatalf("want local 400 conflict, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := gjson.GetBytes(p.cliBody, "params.reasoning_effort").String(); got != tc.want {
+				t.Fatalf("wire effort = %q, want %q", got, tc.want)
+			}
+			if gjson.GetBytes(p.cliBody, "thinking").Exists() || gjson.GetBytes(p.cliBody, "params.thinking").Exists() {
+				t.Fatal("client thinking control leaked into the native wire")
+			}
+		})
+	}
+}
+
 // TestUsageProjectionPreservesPresence proves the overlay restores buckets the
 // cross-protocol conversion drops, and never invents a bucket the source never
 // carried. Fractions and negatives are refused rather than silently rounded.

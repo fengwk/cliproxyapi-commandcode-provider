@@ -1,6 +1,61 @@
 package commandcode
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// Reproduce Pi's DeepSeek-style Chat controls. Only unambiguous controls may
+// pass; unsupported efforts, budgets and conflicts must not be silently dropped.
+func TestChatThinkingCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, controls, want string
+		efforts              []string
+		wantError            string
+	}{
+		{"pi enabled max", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "max", []string{"off", "low", "high", "max"}, ""},
+		{"disabled off", `"thinking":{"type":"disabled"}`, "off", []string{"off", "high"}, ""},
+		{"disabled none", `"thinking":{"type":"disabled"}`, "none", []string{"none", "high"}, ""},
+		{"explicit disabled", `"thinking":{"type":"disabled"},"reasoning_effort":"off"`, "off", []string{"off", "high"}, ""},
+		{"enabled without effort", `"thinking":{"type":"enabled"}`, "", []string{"high"}, "requires an explicit"},
+		{"disabled with max", `"thinking":{"type":"disabled"},"reasoning_effort":"max"`, "", []string{"off", "max"}, "conflicts"},
+		{"enabled with off", `"thinking":{"type":"enabled"},"reasoning_effort":"off"`, "", []string{"off", "max"}, "conflicts"},
+		{"no off capability", `"thinking":{"type":"disabled"}`, "", []string{"high"}, "support off or none"},
+		{"unsupported effort", `"thinking":{"type":"enabled"},"reasoning_effort":"medium"`, "", []string{"high"}, "not supported"},
+		{"fixed budget", `"thinking":{"type":"enabled","budget_tokens":1024},"reasoning_effort":"high"`, "", []string{"high"}, "budgets"},
+		{"unknown nested control", `"thinking":{"type":"enabled","extra":"private-value"},"reasoning_effort":"high"`, "", []string{"high"}, "only supports type"},
+		{"wrong thinking type", `"thinking":true,"reasoning_effort":"high"`, "", []string{"high"}, "must be an object"},
+		{"unknown thinking type", `"thinking":{"type":"adaptive"},"reasoning_effort":"high"`, "", []string{"high"}, "enabled or disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"messages":[{"role":"user","content":"hi"}],` + tc.controls + `}`)
+			caps := Capabilities{ReasoningEfforts: tc.efforts}
+			err := ValidateClientRequest(body, "openai", caps)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("want %q rejection, got %v", tc.wantError, err)
+				}
+				if strings.Contains(err.Error(), "private-value") {
+					t.Fatal("error leaked a client control value")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obj struct {
+				Thinking json.RawMessage `json:"thinking"`
+				Effort   string          `json:"reasoning_effort"`
+			}
+			_ = json.Unmarshal(body, &obj)
+			got, err := ResolveChatThinking(obj.Thinking, obj.Effort, caps)
+			if err != nil || got != tc.want {
+				t.Fatalf("resolved effort = %q, err=%v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
 
 // Six client routes (three protocols x stream/non-stream) must all validate;
 // the CLI wire is streaming either way, so `stream` is not part of the decision.

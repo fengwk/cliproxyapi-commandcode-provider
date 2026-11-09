@@ -23,6 +23,7 @@ func (r *Response) Completion() ([]byte, error)
 ```
 
 - `ValidateClientRequest` 检查原始 OpenAI Chat / Anthropic / Responses 请求，protocol 为 `openai`、`claude`、`openai-response` 或 SDK 别名 `codex`。拒绝无损转换不了的语义字段/part/tool；不主动取远端图片或文件。允许显式 auto tool choice、n=1、普通文本 response_format；固定 thinking budget 无法映射 effort 时返回明确不支持。
+- Chat Completions 兼容 `thinking: {type:"enabled"|"disabled"}`：enabled 必须同时声明模型支持的开启档位 `reasoning_effort`；disabled 无 effort 时按模型能力选择 off（优先）或 none，显式关闭档位保持原值。冲突、预算、未知 nested 控制和不可表达的开关返回 400，不默认选开启强度、不自动调整 effort、不放宽其它未知字段。校验原始请求与宿主最终 effort 后，只向 generate 的 `params.reasoning_effort` 写入结果，不转发 thinking。Anthropic/Responses 规则不变。
 - `DeriveIdentity` 是无状态纯函数，以选中 API key 派生 HMAC 根；按用途与分段 scope 派生 v4 格式稳定 ThreadID、凭据级 login 和项目候选，再按 auth/canonical session 选择项目。固定 64 项 login/项目池，每凭据 4～8 个唯一候选；不把 model/CLI 版本纳入身份。`UpstreamIdentity{ThreadID,WorkingDir,ProjectSlug}` 必须同时通过 v4/variant 和完整 cwd→slug 自洽校验。池项可碰撞，不代表真实机器。
 - `BuildRequest` 只接受经过 SDK 转换的 Anthropic messages/tools/system；使用客户端内容，不复制 CLI 系统提示词。`RequestOptions.Identity` 与 headers 共用，缺失即失败，不保留旧 ThreadID 接口。合成目录 `/home/<login>/proj/<project>`，UTC 日期，空 Git metadata，`memory/taste/skills=null`，`permissionMode=standard`，params.stream 恒 true。max_tokens 默认 64000 并校验明确 cap；temperature/effort 仅合法时发出。省略顶层 mode/promptCache。
 - string system 保持字符串，结构化 system 保留数组与显式 cache/TTL；空 text/reasoning 保留 `text:""`。wire JSON 关闭 HTML escaping，无尾换行，按转义边界输出字面 U+2028/U+2029，不破坏用户反斜杠；原始工具 JSON 数值与键序不经 float64 改写，不承诺任意输入与 JS 运行时逐字节相同。

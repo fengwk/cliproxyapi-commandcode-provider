@@ -14,6 +14,59 @@ import (
 // deepseek-v4.1-flash does NOT list medium, so it must not be used here.
 const familyEffort = "gpt-5.6-luna"
 
+// Pi's real request uses both controls. Verify through CPA, in buffer and
+// stream mode, that enabled/max is consumed and disabled maps to the model's
+// advertised off effort; neither sends a thinking extension upstream.
+func TestChatThinkingCompatibility(t *testing.T) {
+	h := newHarness(t, modeCLI)
+	if status, _ := h.importKeys(t, []string{keyAlpha}, "pi-thinking"); status != http.StatusOK {
+		t.Fatal("import keys failed")
+	}
+	for _, stream := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("stream=%t/enabled=%t", stream, enabled), func(t *testing.T) {
+				h.wire.reset()
+				kind, want := "disabled", "off"
+				if enabled {
+					kind, want = "enabled", "max"
+				}
+				payload := map[string]any{
+					"model": publicModel(familyChatResp), "max_tokens": 128000,
+					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+					"stream":   stream, "stream_options": map[string]any{"include_usage": true},
+					"thinking": map[string]any{"type": kind},
+				}
+				if enabled {
+					payload["reasoning_effort"] = want
+				}
+				body, _ := json.Marshal(payload)
+				status, raw := h.doJSON(t, http.MethodPost, clientChat.path, body, nil)
+				if status != http.StatusOK {
+					t.Fatalf("status=%d body=%s", status, truncate(raw, 300))
+				}
+				calls := inferenceCalls(h.wire.allCalls())
+				if len(calls) != 1 {
+					t.Fatalf("upstream calls=%d, want 1", len(calls))
+				}
+				if got := cliParams(t, calls[0]).ReasoningEffort; got != want {
+					t.Fatalf("upstream effort=%q, want %q", got, want)
+				}
+				var wire struct {
+					Thinking json.RawMessage            `json:"thinking"`
+					Params   map[string]json.RawMessage `json:"params"`
+				}
+				if err := json.Unmarshal(calls[0].Body, &wire); err != nil {
+					t.Fatal(err)
+				}
+				if len(wire.Thinking) != 0 || len(wire.Params["thinking"]) != 0 {
+					t.Fatal("thinking must be mapped, not forwarded")
+				}
+				h.wire.requireClean(t)
+			})
+		}
+	}
+}
+
 // TestNativeControlsPreserved proves the three client protocols' native control
 // fields survive translation into the CLI generate params instead of being
 // dropped or replaced by defaults:

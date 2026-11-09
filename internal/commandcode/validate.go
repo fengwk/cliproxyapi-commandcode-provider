@@ -111,7 +111,7 @@ func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error
 	if err := rejectUnknownKeys(obj, keySet(
 		"model", "messages", "max_tokens", "max_completion_tokens", "temperature",
 		"stream", "tools", "tool_choice", "response_format", "n",
-		"reasoning_effort", "stream_options", "parallel_tool_calls",
+		"reasoning_effort", "thinking", "stream_options", "parallel_tool_calls",
 	)); err != nil {
 		return err
 	}
@@ -143,14 +143,17 @@ func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error
 			return unsupported("disabling parallel tool calls is not supported")
 		}
 	}
+	effort := ""
 	if raw, ok := obj["reasoning_effort"]; ok && present(&raw) {
-		var effort string
 		if err := json.Unmarshal(raw, &effort); err != nil {
 			return invalidRequest("reasoning_effort must be a string")
 		}
 		if !containsString(caps.ReasoningEfforts, effort) {
 			return &Error{Code: CodeReasoningEffort, Message: "reasoning effort is not supported by the selected model", HTTPStatus: 400}
 		}
+	}
+	if _, err := ResolveChatThinking(obj["thinking"], effort, caps); err != nil {
+		return err
 	}
 	if raw, ok := obj["tools"]; ok && present(&raw) {
 		if err := validateChatTools(raw); err != nil {
@@ -161,6 +164,57 @@ func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error
 		return validateChatMessages(raw, caps)
 	}
 	return invalidRequest("messages are required")
+}
+
+// ResolveChatThinking maps the DeepSeek-style Chat extension onto an explicit
+// CLI effort. Validation and provider preparation share this rule, including
+// a second check after the host's effective effort has been selected.
+// It never invents an enabled effort or silently discards conflicting controls.
+func ResolveChatThinking(raw json.RawMessage, effort string, caps Capabilities) (string, error) {
+	if effort != "" && !containsString(caps.ReasoningEfforts, effort) {
+		return "", &Error{Code: CodeReasoningEffort, Message: "reasoning effort is not supported by the selected model", HTTPStatus: 400}
+	}
+	if !present(&raw) {
+		return effort, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "", invalidRequest("thinking must be an object with type enabled or disabled")
+	}
+	for key := range fields {
+		if key != "type" {
+			return "", unsupported("thinking only supports type; budgets and other controls cannot be mapped to a CLI effort")
+		}
+	}
+	var kind string
+	if err := json.Unmarshal(fields["type"], &kind); err != nil {
+		return "", invalidRequest("thinking.type must be enabled or disabled")
+	}
+	switch kind {
+	case "enabled":
+		if effort == "" {
+			return "", unsupported("thinking.type=enabled requires an explicit supported reasoning_effort")
+		}
+		if effort == "off" || effort == "none" {
+			return "", invalidRequest("thinking.type=enabled conflicts with a disabled reasoning_effort")
+		}
+		return effort, nil
+	case "disabled":
+		if effort != "" {
+			if effort != "off" && effort != "none" {
+				return "", invalidRequest("thinking.type=disabled conflicts with an enabled reasoning_effort")
+			}
+			return effort, nil
+		}
+		for _, disabled := range []string{"off", "none"} {
+			if containsString(caps.ReasoningEfforts, disabled) {
+				return disabled, nil
+			}
+		}
+		return "", unsupported("thinking.type=disabled requires the model to support off or none")
+	default:
+		return "", unsupported("thinking.type must be enabled or disabled")
+	}
 }
 
 func validateTextResponseFormat(raw json.RawMessage) error {
