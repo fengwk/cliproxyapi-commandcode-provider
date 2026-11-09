@@ -10,6 +10,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 )
 
 const fixtureFinish = `{"type":"finish","finishReason":"end_turn","totalUsage":{"inputTokens":10,"outputTokens":4,"totalTokens":14,"inputTokenDetails":{"noCacheTokens":3,"cacheReadTokens":5,"cacheWriteTokens":2},"outputTokenDetails":{"reasoningTokens":2}}}`
@@ -196,6 +198,13 @@ func TestDecoderContentEncodings(t *testing.T) {
 		_ = w.Close()
 		return buf.Bytes()
 	}()
+	brotliData := func() []byte {
+		var buf bytes.Buffer
+		w := brotli.NewWriter(&buf)
+		_, _ = w.Write(plain)
+		_ = w.Close()
+		return buf.Bytes()
+	}()
 
 	for name, tc := range map[string]struct {
 		data []byte
@@ -204,6 +213,7 @@ func TestDecoderContentEncodings(t *testing.T) {
 		"gzip":        {gzipData, "gzip"},
 		"zlib":        {zlibData, "deflate"},
 		"raw deflate": {rawDeflate, "deflate"},
+		"brotli":      {brotliData, "br"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			events, err := drain(t, bytes.NewReader(tc.data), tc.enc)
@@ -216,9 +226,83 @@ func TestDecoderContentEncodings(t *testing.T) {
 		})
 	}
 
-	if _, err := NewDecoder(bytes.NewReader(plain), "br"); err == nil {
+	if _, err := NewDecoder(bytes.NewReader(plain), "zstd"); err == nil {
 		t.Fatalf("expected unsupported encoding error")
 	}
+}
+
+// Once the header declares br, a damaged brotli payload must fail closed with
+// the typed read path error instead of being silently passed through or split
+// into invented events.
+func TestDecoderBrotliCorrupt(t *testing.T) {
+	cases := map[string][]byte{
+		"garbage": []byte("corrupt brotli payload"),
+		"truncated": func() []byte {
+			data := brotliEncode([]byte(`{"type":"text-delta","text":"zip"}` + "\n"))
+			return data[:len(data)/2]
+		}(),
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := drain(t, bytes.NewReader(payload), "br")
+			assertCode(t, err, CodeStreamError)
+			var target *Error
+			if !errors.As(err, &target) {
+				t.Fatalf("not a typed error: %v", err)
+			}
+			if target.HTTPStatus != 502 {
+				t.Fatalf("status = %d, want 502", target.HTTPStatus)
+			}
+		})
+	}
+}
+
+// The brotli declaration only pays off if the response rides the same decoded
+// total cap as gzip/deflate: a tiny encoded payload that expands past the cap
+// must stop with the decoded-size error, never exhaust memory. Lines stay well
+// below the per-line cap so the total cap, not the line cap, is the limit hit.
+func TestDecoderBrotliDecodedSizeCap(t *testing.T) {
+	unit := []byte(`{"type":"text-delta","text":"` + strings.Repeat("y", 1<<18) + `"}` + "\n")
+	encoded := brotliEncodeL(unit, brotli.BestSpeed, int64(maxDecodedBytes))
+
+	decoder, err := NewDecoder(bytes.NewReader(encoded), "br")
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	defer decoder.Close()
+	for {
+		// Events are discarded: this turn is intentionally cut inside the cap.
+		if _, err := decoder.Next(); err != nil {
+			assertCode(t, err, CodeContentNotDecodable)
+			break
+		}
+	}
+}
+
+// brotliEncode compresses the payload once at the default level.
+func brotliEncode(data []byte) []byte {
+	return brotliEncodeL(data, brotli.DefaultCompression, int64(len(data))+1)
+}
+
+// brotliEncodeL keeps writing data into one brotli stream until more than
+// minBytes have been appended, so tiny inputs can be forced to expand.
+func brotliEncodeL(data []byte, level int, minBytes int64) []byte {
+	var buf bytes.Buffer
+	w := brotli.NewWriterLevel(&buf, level)
+	var written int64
+	for {
+		if _, err := w.Write(data); err != nil {
+			panic(err)
+		}
+		written += int64(len(data))
+		if written >= minBytes {
+			break
+		}
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
 }
 
 func TestDecoderLineTooLong(t *testing.T) {

@@ -11,6 +11,8 @@ import (
 	"io"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/andybalholm/brotli"
 )
 
 // Stream bounds protect against malformed or hostile upstream NDJSON. A single
@@ -43,8 +45,9 @@ func (l *limitedReader) Read(p []byte) (int, error) {
 }
 
 // Decoder is a bounded NDJSON reader over the current upstream turn. It handles
-// gzip/deflate, CRLF, final lines without a newline and UTF-8 split across
-// chunks, and it keeps per-turn cache-write supplements for the finish event.
+// gzip/deflate/brotli, CRLF, final lines without a newline and UTF-8 split
+// across chunks, and it keeps per-turn cache-write supplements for the finish
+// event.
 type Decoder struct {
 	reader     *bufio.Reader
 	closers    []io.Closer
@@ -93,6 +96,12 @@ func NewDecoder(reader io.Reader, contentEncoding string) (*Decoder, error) {
 		} else {
 			return nil, encodingError("failed to open deflate stream")
 		}
+	case "br":
+		// brotli.Reader surfaces corruption lazily on Read and never fails at
+		// construction, so it is not registered as a closer and a damaged
+		// stream becomes the typed read path error. Its output still rides the
+		// single total decoded-size cap shared with the other encodings.
+		src = brotli.NewReader(src)
 	default:
 		return nil, encodingError("unsupported content encoding")
 	}
