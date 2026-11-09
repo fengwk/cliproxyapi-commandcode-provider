@@ -163,6 +163,8 @@ func TestFactsThinkingHonest(t *testing.T) {
 	}
 }
 
+// Effective count is the reviewed 95-model intersection plus explicit manual
+// additions; a whitelist still narrows the same published catalog.
 func TestCatalogCountReflectsEffectiveModels(t *testing.T) {
 	narrowed := NewManager(nil)
 	narrowed.setConfig(Config{Mode: ModeCLI, BaseURL: DefaultBaseURL, Models: []string{"claude-sonnet-5"}})
@@ -170,7 +172,7 @@ func TestCatalogCountReflectsEffectiveModels(t *testing.T) {
 		t.Fatalf("the catalog count must reflect the whitelist, got %d", info.Count)
 	}
 	withManual := testManager(ModeCLI, ManualModel{ID: "minimax/minimax-m3-free"})
-	if info := withManual.catalogInfoForMode(withManual.config()); info.Count != 88 {
+	if info := withManual.catalogInfoForMode(withManual.config()); info.Count != 96 {
 		t.Fatalf("the catalog count must include manual models, got %d", info.Count)
 	}
 }
