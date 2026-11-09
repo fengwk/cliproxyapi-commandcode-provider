@@ -15,8 +15,7 @@ const validUUID = "6ae139ca-c1d9-4793-b78b-17a3888bf11c"
 const identityWorkingDir = "/home/alex/proj/alpha-services"
 
 // testIdentity builds the self-consistent UpstreamIdentity tests send to the
-// builder. Request shaping must consume this value alone; there is no fallback
-// to the legacy RequestOptions.ThreadID field.
+// builder. Request shaping must consume this value alone.
 func testIdentity(threadID string) UpstreamIdentity {
 	return UpstreamIdentity{
 		ThreadID:    threadID,
@@ -39,7 +38,7 @@ func mustBuild(t *testing.T, payload string, opts RequestOptions) map[string]any
 }
 
 // The request config is identity-driven and otherwise fixed: it must never
-// leak machine or git state, and legacy ThreadID-only options must fail closed.
+// leak machine or git state.
 func TestBuildRequestIdentityConfig(t *testing.T) {
 	obj := mustBuild(t, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, RequestOptions{
 		Model:    "native/m",
@@ -91,14 +90,11 @@ func TestBuildRequestIdentityConfig(t *testing.T) {
 	}
 }
 
-// The builder must not fall back to the legacy ThreadID option in either
-// direction: the identity value wins on the wire even when it disagrees with
-// the legacy field, and a legacy-only call is rejected instead of silently used.
+// The builder must consume the shared identity and reject a missing identity,
+// rather than inventing a thread or workspace independently.
 func TestBuildRequestConsumesIdentityOnly(t *testing.T) {
-	legacy := "00000000-0000-7000-8000-000000000000"
 	body, err := BuildRequest([]byte(`{"model":"m","messages":[]}`), RequestOptions{
 		Model:    "native/m",
-		ThreadID: legacy,
 		Identity: testIdentity(validUUID),
 	})
 	if err != nil {
@@ -107,14 +103,10 @@ func TestBuildRequestConsumesIdentityOnly(t *testing.T) {
 	if !bytes.Contains(body, []byte(`"threadId":"`+validUUID+`"`)) {
 		t.Fatalf("body must carry the identity threadId: %s", body)
 	}
-	if bytes.Contains(body, []byte("00000000-")) {
-		t.Fatalf("legacy ThreadID leaked into the body: %s", body)
-	}
 	if _, err := BuildRequest([]byte(`{"model":"m","messages":[]}`), RequestOptions{
-		Model:    "native/m",
-		ThreadID: validUUID,
+		Model: "native/m",
 	}); err == nil {
-		t.Fatalf("legacy ThreadID-only options must fail closed, not act as fallback")
+		t.Fatalf("missing identity must fail closed")
 	}
 }
 

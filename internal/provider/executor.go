@@ -60,7 +60,6 @@ type plan struct {
 
 	// CLI mode.
 	public     string
-	threadID   string
 	cliBody    []byte
 	cliHeaders http.Header
 	cliWire    *pluginapi.HTTPWireProfile

@@ -7,9 +7,9 @@ import (
 	"github.com/fengwk/cliproxyapi-commandcode-provider/internal/catalogdata"
 )
 
-// testIdentity is a fixed legal upstream identity shared by the header tests.
+// headerTestIdentity is a fixed legal upstream identity shared by the header tests.
 // Headers must consume the unified identity, never DeriveIdentity of their own.
-var testIdentity = UpstreamIdentity{
+var headerTestIdentity = UpstreamIdentity{
 	ThreadID:    validUUID,
 	WorkingDir:  "/home/alex/proj/alpha-services",
 	ProjectSlug: "home-alex-proj-alpha-services",
@@ -20,7 +20,7 @@ var testIdentity = UpstreamIdentity{
 // the profile pins them at the first/last wire position; connection is a single
 // explicit close; accept-encoding declares the HTTPS br baseline.
 func TestRequestHeadersGolden(t *testing.T) {
-	header, profile, err := RequestHeaders("secret-key", testIdentity, false)
+	header, profile, err := RequestHeaders("secret-key", headerTestIdentity, false)
 	if err != nil {
 		t.Fatalf("RequestHeaders: %v", err)
 	}
@@ -30,9 +30,9 @@ func TestRequestHeadersGolden(t *testing.T) {
 		"User-Agent":             "cli",
 		"x-command-code-version": catalogdata.CLIVersion,
 		"x-cli-environment":      "production",
-		"x-project-slug":         testIdentity.ProjectSlug,
+		"x-project-slug":         headerTestIdentity.ProjectSlug,
 		"x-taste-learning":       "false",
-		"x-session-id":           testIdentity.ThreadID,
+		"x-session-id":           headerTestIdentity.ThreadID,
 		"Authorization":          "Bearer secret-key",
 		"accept":                 "*/*",
 		"accept-language":        "*",
@@ -73,7 +73,7 @@ func TestRequestHeadersGolden(t *testing.T) {
 }
 
 func TestRequestHeadersZDR(t *testing.T) {
-	header, _, err := RequestHeaders("secret-key", testIdentity, true)
+	header, _, err := RequestHeaders("secret-key", headerTestIdentity, true)
 	if err != nil {
 		t.Fatalf("RequestHeaders: %v", err)
 	}
@@ -85,17 +85,17 @@ func TestRequestHeadersZDR(t *testing.T) {
 // A broken shared identity must be rejected before any header is built so a
 // caller cannot send a half-initialized thread/workspace upstream.
 func TestRequestHeadersRejectsBadIdentity(t *testing.T) {
-	badThread := testIdentity
+	badThread := headerTestIdentity
 	badThread.ThreadID = "not-a-uuid"
 	if _, _, err := RequestHeaders("k", badThread, false); err == nil {
 		t.Fatalf("expected error for bad threadId")
 	}
-	inconsistentSlug := testIdentity
+	inconsistentSlug := headerTestIdentity
 	inconsistentSlug.ProjectSlug = "alpha-services"
 	if _, _, err := RequestHeaders("k", inconsistentSlug, false); err == nil {
 		t.Fatalf("expected error for inconsistent workspace slug")
 	}
-	if _, _, err := RequestHeaders("", testIdentity, false); err == nil {
+	if _, _, err := RequestHeaders("", headerTestIdentity, false); err == nil {
 		t.Fatalf("expected error for empty key")
 	}
 }
@@ -111,7 +111,7 @@ func TestRequestHeadersRejectsInjection(t *testing.T) {
 		"tab":          "abc\tdef",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := RequestHeaders(key, testIdentity, false); err == nil {
+			if _, _, err := RequestHeaders(key, headerTestIdentity, false); err == nil {
 				t.Fatalf("key %q must be rejected", key)
 			}
 		})

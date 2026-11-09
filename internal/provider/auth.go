@@ -11,9 +11,7 @@ import (
 // Errors returned by request preparation. They deliberately carry no key
 // material or credential payload.
 var (
-	errMissingAuthID   = errors.New("selected auth is missing an id")
 	errMissingSession  = errors.New("canonical session id is required")
-	errSessionScope    = errors.New("failed to derive session scope")
 	errMissingKey      = errors.New("selected auth has no api key")
 	errInvalidKey      = errors.New("selected auth has an invalid api key")
 	errUnsupportedPair = errors.New("unsupported protocol translation pair")

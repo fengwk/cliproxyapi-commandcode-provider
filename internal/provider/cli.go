@@ -49,11 +49,10 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	if canonical == "" {
 		return &ProviderError{Code: "session_missing", Message: errMissingSession.Error(), HTTPStatus: http.StatusBadRequest}
 	}
-	threadID, errScope := sessionThreadID(req.AuthID, canonical)
+	identity, errScope := commandcode.DeriveIdentity(p.key, req.AuthID, canonical)
 	if errScope != nil {
-		return &ProviderError{Code: "session_missing", Message: errScope.Error(), HTTPStatus: http.StatusBadRequest}
+		return localError(errScope)
 	}
-	p.threadID = threadID
 	caps := commandcode.Capabilities{
 		Vision:           p.facts.visionEnabled(),
 		ReasoningEfforts: append([]string(nil), p.facts.efforts...),
@@ -72,7 +71,7 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	anthropic = restoreCLIControls(p.clientReq, anthropic, p.original)
 	body, errBuild := commandcode.BuildRequest(anthropic, commandcode.RequestOptions{
 		Model:           p.native,
-		ThreadID:        threadID,
+		Identity:        identity,
 		Now:             time.Now().UTC(),
 		Capabilities:    caps,
 		ReasoningEffort: reasoningEffort(req.Metadata, p.clientReq, p.original),
@@ -80,7 +79,7 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	if errBuild != nil {
 		return localError(errBuild)
 	}
-	headers, wire, errHeaders := commandcode.RequestHeaders(p.key, threadID, p.cfg.ZDR)
+	headers, wire, errHeaders := commandcode.RequestHeaders(p.key, identity, p.cfg.ZDR)
 	if errHeaders != nil {
 		return localError(errHeaders)
 	}

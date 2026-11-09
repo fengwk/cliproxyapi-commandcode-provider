@@ -16,7 +16,6 @@ type Capabilities struct {
 // RequestOptions bind a canonical Anthropic-shaped input to one upstream call.
 type RequestOptions struct {
 	Model           string
-	ThreadID        string
 	Identity        UpstreamIdentity
 	Now             time.Time
 	Capabilities    Capabilities
