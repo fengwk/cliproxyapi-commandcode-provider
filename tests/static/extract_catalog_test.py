@@ -106,6 +106,61 @@ class ToolCase(unittest.TestCase):
             },
         )
 
+    def test_escape_decoding_is_explicit(self):
+        # \\uXXXX, \\xHH and the declared single-character escapes decode; a
+        # surrogate pair becomes one code point.
+        hot = entry(0).replace(
+            '"Model 0"', '"Caf\\u00e9 \\x41 \\u4e2d \\uD83D\\uDE00 \\t"'
+        )
+        models = self.extract(bundle([hot] + base_entries(ENTRY_COUNT - 1, 1)))["models"]
+        self.assertEqual(models[0]["name"], "Caf\u00e9 A \u4e2d \U0001F600 \t")
+
+    def test_unsupported_escapes_fail_closed(self):
+        # Guessing would corrupt facts: JS-only/unknown escapes and bad hex are errors.
+        for name, literal in (
+            ("unknown escape", '"a\\qb"'),
+            ("bad unicode hex", '"a\\u12G4"'),
+            ("bad byte hex", '"a\\x4"'),
+            ("legacy octal escape", r'"a\1"'),
+        ):
+            with self.subTest(name=name):
+                source = bundle([entry(0).replace('"Model 0"', literal)] + base_entries(ENTRY_COUNT - 1, 1))
+                done = self.run_tool("extract", "--bundle", self.write("cli.mjs", source), "--version", VERSION)
+                self.assertEqual(done.returncode, 2, done.stdout)
+                self.assertIn("error:", done.stderr)
+
+    def test_duplicate_property_in_one_entry_fails(self):
+        source = bundle([entry(0, ",contextWindow:1000,contextWindow:2000")] + base_entries(ENTRY_COUNT - 1, 1))
+        done = self.run_tool("extract", "--bundle", self.write("cli.mjs", source), "--version", VERSION)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("duplicate property", done.stderr)
+
+    def test_booleans_are_not_positive_integers(self):
+        for field in ("contextWindow", "maxOutputTokens"):
+            with self.subTest(field=field):
+                source = bundle([entry(0, ",{0}:true".format(field))] + base_entries(ENTRY_COUNT - 1, 1))
+                done = self.run_tool("extract", "--bundle", self.write("cli.mjs", source), "--version", VERSION)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("invalid " + field, done.stderr)
+
+    def test_cli_reports_input_errors_without_tracebacks(self):
+        missing = self.run_tool("extract", "--version", VERSION)
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("--bundle", missing.stderr)
+
+        no_file = self.run_tool("extract", "--bundle", self.path("absent.mjs"), "--version", VERSION)
+        self.assertEqual(no_file.returncode, 2)
+        self.assertIn("cannot read", no_file.stderr)
+        self.assertNotIn("Traceback", no_file.stderr)
+
+        bad_date = self.run_tool(
+            "extract", "--bundle", self.write("cli.mjs", bundle(base_entries())), "--version", VERSION,
+            "--date", "2026-02-30",
+        )
+        self.assertEqual(bad_date.returncode, 2)
+        self.assertIn("2026-02-30", bad_date.stderr)
+        self.assertNotIn("Traceback", bad_date.stderr)
+
     # --- 3. ambiguous or unsupported input fails closed ----------------------
     def test_ambiguous_model_maps_fail(self):
         # Two candidate maps each pass the signature, so the tool must refuse
@@ -148,6 +203,9 @@ class ToolCase(unittest.TestCase):
         self.assertIn("added 1: model-" + str(ENTRY_COUNT), done.stdout)
         self.assertIn("removed 1: model-1", done.stdout)
         self.assertIn("Model 0' -> 'Renamed 0", done.stdout)
+        # Removed entries are listed once; they are not "changed" facts.
+        self.assertIn("changed 1:", done.stdout)
+        self.assertIn("unchanged " + str(ENTRY_COUNT - 2), done.stdout)
 
     def test_check_accepts_matching_and_rejects_drifted_snapshot(self):
         source = bundle(base_entries())
