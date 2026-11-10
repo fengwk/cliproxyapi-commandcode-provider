@@ -32,7 +32,7 @@ const (
 	providerID    = "commandcode"
 	pluginID      = "cliproxyapi-commandcode-provider"
 	pluginName    = "CommandCode Provider"
-	pluginVersion = "0.4.1"
+	pluginVersion = "0.4.2"
 
 	clientKey = "fake-client-key"
 	mgmtKey   = "fake-management-password"

@@ -25,7 +25,7 @@ const maxPauseTurns = 5
 // maxMessageLength bounds any error text surfaced to the host.
 const maxMessageLength = 200
 
-// prepareCLI validates the original client request, converts it to the
+// prepareCLI projects and validates the client request, converts it to the
 // Anthropic input the CLI expects, and builds the immutable generate request and
 // its wire profile.
 func (p *plan) prepareCLI(req rpcExecutorRequest) error {
@@ -61,24 +61,25 @@ func (p *plan) prepareCLI(req rpcExecutorRequest) error {
 	if len(p.original) == 0 {
 		return &ProviderError{Code: "invalid_request", Message: "request body is required", HTTPStatus: http.StatusBadRequest}
 	}
-	if err := commandcode.ValidateClientRequest(p.original, p.clientReq.String(), caps); err != nil {
+	clientBody, err := commandcode.NormalizeClientRequest(p.original, p.clientReq.String(), caps)
+	if err != nil {
 		return localError(err)
 	}
-	effort := reasoningEffort(req.Metadata, p.clientReq, p.original)
+	effort := reasoningEffort(req.Metadata, p.clientReq, clientBody)
 	if p.clientReq == translator.FormatOpenAI {
-		// Consume the compatibility control before SDK translation. Check the
-		// effective host effort too so metadata cannot reverse disabled thinking.
+		// Resolve compatibility only after selecting the real effort. An
+		// explicit native control outranks a vendor thinking switch.
 		var err error
-		effort, err = commandcode.ResolveChatThinking(json.RawMessage(gjson.GetBytes(p.original, "thinking").Raw), effort, caps)
+		effort, err = commandcode.ResolveChatThinking(json.RawMessage(gjson.GetBytes(clientBody, "thinking").Raw), effort, caps)
 		if err != nil {
 			return localError(err)
 		}
 	}
-	anthropic, errTranslate := toAnthropic(p.clientReq, p.native, p.original)
+	anthropic, errTranslate := toAnthropic(p.clientReq, p.native, clientBody)
 	if errTranslate != nil {
 		return errTranslate
 	}
-	anthropic = restoreCLIControls(p.clientReq, anthropic, p.original)
+	anthropic = restoreCLIControls(p.clientReq, anthropic, clientBody)
 	body, errBuild := commandcode.BuildRequest(anthropic, commandcode.RequestOptions{
 		Model:           p.native,
 		Identity:        identity,

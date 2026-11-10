@@ -9,7 +9,7 @@
 
 > 本文档描述**已实现的插件契约**。除特别说明外，所有上游行为均以合成的本地 mock 验证，**没有对真实 CommandCode 服务做过生产验收**（见“与真实上游的验收状态”）。安装可使用插件商店或手动构建方式。
 
-> 当前版本 **v0.4.1**：修复 pi 等 Chat 客户端同时发送 `thinking` 与 `reasoning_effort` 时被拒绝的问题，按模型能力映射且拒绝冲突，详见 [发布说明](docs/release-notes-v0.4.1.md)。沿用 v0.4.0 的 `cmd 1.88.5` 请求层基线；不代表 TLS 指纹相同或保证缓存命中。
+> 当前版本 **v0.4.2**：CLI 请求先提取支持字段和适配输入，再校验、重建 CommandCode 请求；忽略 `tool_stream` 等厂商扩展，显式 `reasoning_effort` 优先于 thinking 兼容层。详见 [发布说明](docs/release-notes-v0.4.2.md)。沿用 `cmd 1.88.5` 请求层基线；不代表 TLS 指纹相同或保证缓存命中。
 
 ## 职责边界
 
@@ -56,10 +56,10 @@ plugins:
 
 ```bash
 make build        # 产物 dist/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib}
-make package VERSION=0.4.1   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
+make package VERSION=0.4.2   # 生成插件商店 ZIP（含 metadata.json 与 .zip.sha256）
 ```
 
-`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.4.1` 时归档为 `cliproxyapi-commandcode-provider_0.4.1_<goos>_<goarch>.zip`；不传则非 tag 本地构建使用 `0.4.1-dev+<short-sha>`。发布由 tag 决定版本。
+`make package` 的归档名与 `metadata.json` 使用 `VERSION`：显式传 `VERSION=0.4.2` 时归档为 `cliproxyapi-commandcode-provider_0.4.2_<goos>_<goarch>.zip`；不传则非 tag 本地构建使用 `0.4.2-dev+<short-sha>`。发布由 tag 决定版本。
 
 把动态库放到 `<plugins.dir>/<goos>/<goarch>/cliproxyapi-commandcode-provider.{so,dylib,dll}`。注意 Linux 产物依赖 glibc，**不适用于 musl/Alpine**。
 
@@ -102,7 +102,7 @@ plugins:
 
 v0.1.0 遗漏了宿主保留字段 `store`，商店安装后可能在 `plugin.register` / `plugin.reconfigure` 返回 `invalid config yaml`；全局和实例开关开启也无法解决。这同时会导致插件名称、可视化配置字段和管理菜单缺失。
 
-**v0.1.1 起已修复**：刷新插件商店，升级或重新安装当前版本 **v0.4.1**。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装当前版本，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
+**v0.1.1 起已修复**：刷新插件商店，升级或重新安装当前版本 **v0.4.2**。保留现有插件设置及凭据，无须移除 `store` 元数据或修改 CPA 核心。若之前为临时恢复而删除了 `store`，通过商店安装当前版本，让 CPA 重建对应新版本的元数据；不要原样恢复旧 `store.version`，以免重新选择旧库。反复安装同一个 v0.1.0 不能解决问题。
 
 ## 导入 CommandCode 密钥
 

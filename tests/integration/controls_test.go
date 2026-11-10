@@ -67,6 +67,78 @@ func TestChatThinkingCompatibility(t *testing.T) {
 	}
 }
 
+// Reproduce the complete GLM control set from Pi 1.5.1, not just the earlier
+// DeepSeek thinking switch. Extensions are discarded; explicit max and the
+// model's 131072-token cap remain authoritative on both execution paths.
+func TestPiGLMProjectedControls(t *testing.T) {
+	h := newHarness(t, modeCLI)
+	if status, _ := h.importKeys(t, []string{keyAlpha}, "pi-glm"); status != http.StatusOK {
+		t.Fatal("import keys failed")
+	}
+	var tools []any
+	for i := 0; i < 13; i++ {
+		tools = append(tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":       "tool_" + string(rune('a'+i)),
+				"parameters": map[string]any{"type": "object"},
+			},
+		})
+	}
+	payload := map[string]any{
+		"model": "commandcode/z-ai/glm-5.3-flash", "max_tokens": 131072,
+		"messages": []any{
+			map[string]any{"role": "system", "content": "test system"},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+		"reasoning_effort": "max", "tools": tools, "tool_stream": true,
+		"thinking":       map[string]any{"type": "enabled", "clear_thinking": false},
+		"stream_options": map[string]any{"include_usage": true},
+	}
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			h.wire.reset()
+			payload["stream"] = stream
+			body, _ := json.Marshal(payload)
+			status, raw := h.doJSON(t, http.MethodPost, clientChat.path, body, nil)
+			if status != http.StatusOK {
+				t.Fatalf("status=%d body=%s", status, truncate(raw, 300))
+			}
+			calls := inferenceCalls(h.wire.allCalls())
+			if len(calls) != 1 {
+				t.Fatalf("upstream calls=%d, want 1", len(calls))
+			}
+			params := cliParams(t, calls[0])
+			if params.Model != "z-ai/glm-5.3-flash" || params.MaxTokens != 131072 || params.ReasoningEffort != "max" {
+				t.Fatalf("explicit native controls changed: %+v", params)
+			}
+			var wire map[string]json.RawMessage
+			_ = json.Unmarshal(calls[0].Body, &wire)
+			var native map[string]json.RawMessage
+			_ = json.Unmarshal(wire["params"], &native)
+			for _, ignored := range []string{"thinking", "tool_stream", "clear_thinking"} {
+				if wire[ignored] != nil || native[ignored] != nil {
+					t.Fatalf("extension %s reached the native wire", ignored)
+				}
+			}
+			var nativeTools []json.RawMessage
+			if err := json.Unmarshal(native["tools"], &nativeTools); err != nil || len(nativeTools) != 13 {
+				t.Fatalf("supported tools lost: count=%d err=%v", len(nativeTools), err)
+			}
+			h.wire.requireClean(t)
+		})
+	}
+	// A supported value must still be rejected after extension removal if it
+	// violates the final model contract; rejection must make zero upstream calls.
+	h.wire.reset()
+	payload["max_tokens"], payload["stream"] = 131073, false
+	body, _ := json.Marshal(payload)
+	status, _ := h.doJSON(t, http.MethodPost, clientChat.path, body, nil)
+	if status != http.StatusBadRequest || len(inferenceCalls(h.wire.allCalls())) != 0 {
+		t.Fatalf("invalid projected limit: status=%d upstream_calls=%d", status, len(inferenceCalls(h.wire.allCalls())))
+	}
+}
+
 // TestNativeControlsPreserved proves the three client protocols' native control
 // fields survive translation into the CLI generate params instead of being
 // dropped or replaced by defaults:

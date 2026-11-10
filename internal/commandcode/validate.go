@@ -7,24 +7,84 @@ import (
 	"unicode/utf8"
 )
 
-// ValidateClientRequest inspects a raw client request (OpenAI Chat, Anthropic
-// Messages or OpenAI Responses / codex) before the public SDK translator runs.
-// It rejects semantics the CLI generate wire cannot express losslessly so the
-// SDK never silently drops them. It performs no network or filesystem access.
+// ValidateClientRequest applies the same projection and validation as the
+// production request path. Unknown extension fields are not wire controls.
 func ValidateClientRequest(body []byte, protocol string, caps Capabilities) error {
+	_, err := NormalizeClientRequest(body, protocol, caps)
+	return err
+}
+
+// NormalizeClientRequest selects supported inputs and recognized constraints
+// before the SDK runs. Extensions cannot accidentally change SDK behavior.
+// Known invalid controls and unsupported content still fail locally; the final
+// generate builder validates translated values against the same capabilities.
+func NormalizeClientRequest(body []byte, protocol string, caps Capabilities) ([]byte, error) {
 	obj, err := decodeRequestObject(body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch normalizeProtocol(protocol) {
 	case "openai":
-		return validateOpenAIChat(obj, caps)
+		retainFields(obj,
+			"model", "messages", "max_tokens", "max_completion_tokens", "temperature",
+			"stream", "tools", "tool_choice", "response_format", "n",
+			"reasoning_effort", "thinking", "stream_options", "parallel_tool_calls")
+		// Chat's newer token-limit spelling wins; validate the selected value,
+		// not a superseded alias, and feed only one spelling into the SDK.
+		if raw := obj["max_completion_tokens"]; present(&raw) {
+			obj["max_tokens"] = raw
+		}
+		delete(obj, "max_completion_tokens")
+		effort := obj["reasoning_effort"]
+		if present(&effort) {
+			// The native effort is authoritative. A vendor compatibility
+			// switch must not override it or block an otherwise valid effort.
+			delete(obj, "thinking")
+		} else if raw := obj["thinking"]; present(&raw) {
+			thinking, err := decodeRequestObject(raw)
+			if err != nil {
+				return nil, invalidRequest("thinking must be an object")
+			}
+			// type is an adapter input; a fixed budget is a recognized
+			// unrepresentable constraint. Other vendor controls are ignored.
+			retainFields(thinking, "type", "budget_tokens")
+			if len(thinking) == 0 {
+				delete(obj, "thinking")
+			} else {
+				obj["thinking"], _ = marshalWire(thinking)
+			}
+		}
+		err = validateOpenAIChat(obj, caps)
 	case "claude":
-		return validateAnthropic(obj, caps)
+		retainFields(obj, "model", "messages", "system", "tools", "tool_choice",
+			"max_tokens", "temperature", "stream", "thinking", "output_config")
+		err = validateAnthropic(obj, caps)
 	case "openai-response":
-		return validateResponses(obj, caps)
+		retainFields(obj, "model", "input", "instructions", "tools", "tool_choice",
+			"max_output_tokens", "temperature", "stream", "reasoning", "text",
+			"previous_response_id", "store", "background")
+		err = validateResponses(obj, caps)
 	default:
-		return invalidRequest("unsupported client protocol")
+		return nil, invalidRequest("unsupported client protocol")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if raw := obj["temperature"]; present(&raw) {
+		var value float64
+		if json.Unmarshal(raw, &value) != nil || value < 0 || value > 2 {
+			return nil, invalidRequest("temperature must be a number between 0 and 2")
+		}
+	}
+	return marshalWire(obj)
+}
+
+func retainFields(obj map[string]json.RawMessage, keys ...string) {
+	allowed := keySet(keys...)
+	for key := range obj {
+		if !allowed[key] {
+			delete(obj, key)
+		}
 	}
 }
 
@@ -54,15 +114,6 @@ func decodeRequestObject(body []byte) (map[string]json.RawMessage, error) {
 		return nil, invalidRequest("request body must be a JSON object")
 	}
 	return obj, nil
-}
-
-func rejectUnknownKeys(obj map[string]json.RawMessage, allowed map[string]bool) error {
-	for _, key := range sortedKeys(obj) {
-		if !allowed[key] {
-			return unsupported("request field is not supported by the CLI wire")
-		}
-	}
-	return nil
 }
 
 func keySet(keys ...string) map[string]bool {
@@ -108,13 +159,6 @@ func toolsNonEmpty(obj map[string]json.RawMessage) bool {
 }
 
 func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error {
-	if err := rejectUnknownKeys(obj, keySet(
-		"model", "messages", "max_tokens", "max_completion_tokens", "temperature",
-		"stream", "tools", "tool_choice", "response_format", "n",
-		"reasoning_effort", "thinking", "stream_options", "parallel_tool_calls",
-	)); err != nil {
-		return err
-	}
 	if err := checkDeclaredLimit(obj, caps, "max_tokens", "max_completion_tokens"); err != nil {
 		return err
 	}
@@ -169,10 +213,14 @@ func validateOpenAIChat(obj map[string]json.RawMessage, caps Capabilities) error
 // ResolveChatThinking maps the DeepSeek-style Chat extension onto an explicit
 // CLI effort. Validation and provider preparation share this rule, including
 // a second check after the host's effective effort has been selected.
-// It never invents an enabled effort or silently discards conflicting controls.
+// An explicitly selected native effort outranks the compatibility switch;
+// without one we never invent an enabled effort.
 func ResolveChatThinking(raw json.RawMessage, effort string, caps Capabilities) (string, error) {
-	if effort != "" && !containsString(caps.ReasoningEfforts, effort) {
-		return "", &Error{Code: CodeReasoningEffort, Message: "reasoning effort is not supported by the selected model", HTTPStatus: 400}
+	if effort != "" {
+		if !containsString(caps.ReasoningEfforts, effort) {
+			return "", &Error{Code: CodeReasoningEffort, Message: "reasoning effort is not supported by the selected model", HTTPStatus: 400}
+		}
+		return effort, nil
 	}
 	if !present(&raw) {
 		return effort, nil
@@ -181,10 +229,8 @@ func ResolveChatThinking(raw json.RawMessage, effort string, caps Capabilities) 
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return "", invalidRequest("thinking must be an object with type enabled or disabled")
 	}
-	for key := range fields {
-		if key != "type" {
-			return "", unsupported("thinking only supports type; budgets and other controls cannot be mapped to a CLI effort")
-		}
+	if budget := fields["budget_tokens"]; present(&budget) {
+		return "", unsupported("thinking.budget_tokens cannot be mapped to a CLI effort")
 	}
 	var kind string
 	if err := json.Unmarshal(fields["type"], &kind); err != nil {
@@ -192,20 +238,8 @@ func ResolveChatThinking(raw json.RawMessage, effort string, caps Capabilities) 
 	}
 	switch kind {
 	case "enabled":
-		if effort == "" {
-			return "", unsupported("thinking.type=enabled requires an explicit supported reasoning_effort")
-		}
-		if effort == "off" || effort == "none" {
-			return "", invalidRequest("thinking.type=enabled conflicts with a disabled reasoning_effort")
-		}
-		return effort, nil
+		return "", unsupported("thinking.type=enabled requires an explicit supported reasoning_effort")
 	case "disabled":
-		if effort != "" {
-			if effort != "off" && effort != "none" {
-				return "", invalidRequest("thinking.type=disabled conflicts with an enabled reasoning_effort")
-			}
-			return effort, nil
-		}
 		for _, disabled := range []string{"off", "none"} {
 			if containsString(caps.ReasoningEfforts, disabled) {
 				return disabled, nil
@@ -454,12 +488,6 @@ func validateChatToolCalls(raw json.RawMessage) error {
 }
 
 func validateAnthropic(obj map[string]json.RawMessage, caps Capabilities) error {
-	if err := rejectUnknownKeys(obj, keySet(
-		"model", "messages", "system", "tools", "tool_choice", "max_tokens",
-		"temperature", "stream", "thinking", "output_config",
-	)); err != nil {
-		return err
-	}
 	if err := checkDeclaredLimit(obj, caps, "max_tokens"); err != nil {
 		return err
 	}
@@ -778,12 +806,24 @@ func validateAnthropicImage(raw json.RawMessage, caps Capabilities) error {
 }
 
 func validateResponses(obj map[string]json.RawMessage, caps Capabilities) error {
-	if err := rejectUnknownKeys(obj, keySet(
-		"model", "input", "instructions", "tools", "tool_choice",
-		"max_output_tokens", "temperature", "stream", "reasoning", "text",
-	)); err != nil {
-		return err
+	// These are recognized stateful execution constraints, not inert vendor
+	// extensions: accepting them would claim persistence we do not implement.
+	if raw := obj["previous_response_id"]; present(&raw) {
+		return unsupported("previous_response_id is not supported by the stateless CLI wire")
 	}
+	for _, name := range []string{"store", "background"} {
+		if raw := obj[name]; present(&raw) {
+			var enabled bool
+			if json.Unmarshal(raw, &enabled) != nil {
+				return invalidRequest(name + " must be a boolean")
+			}
+			if enabled {
+				return unsupported(name + "=true is not supported by the stateless CLI wire")
+			}
+		}
+		delete(obj, name)
+	}
+	delete(obj, "previous_response_id")
 	if err := checkDeclaredLimit(obj, caps, "max_output_tokens"); err != nil {
 		return err
 	}

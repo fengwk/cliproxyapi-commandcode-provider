@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// Reproduce Pi's DeepSeek-style Chat controls. Only unambiguous controls may
-// pass; unsupported efforts, budgets and conflicts must not be silently dropped.
+// Native effort outranks compatibility switches. Without an explicit effort,
+// only a representable switch is adapted; enabled never invents a level.
 func TestChatThinkingCompatibility(t *testing.T) {
 	for _, tc := range []struct {
 		name, controls, want string
@@ -19,14 +19,14 @@ func TestChatThinkingCompatibility(t *testing.T) {
 		{"disabled none", `"thinking":{"type":"disabled"}`, "none", []string{"none", "high"}, ""},
 		{"explicit disabled", `"thinking":{"type":"disabled"},"reasoning_effort":"off"`, "off", []string{"off", "high"}, ""},
 		{"enabled without effort", `"thinking":{"type":"enabled"}`, "", []string{"high"}, "requires an explicit"},
-		{"disabled with max", `"thinking":{"type":"disabled"},"reasoning_effort":"max"`, "", []string{"off", "max"}, "conflicts"},
-		{"enabled with off", `"thinking":{"type":"enabled"},"reasoning_effort":"off"`, "", []string{"off", "max"}, "conflicts"},
+		{"max outranks disabled", `"thinking":{"type":"disabled"},"reasoning_effort":"max"`, "max", []string{"off", "max"}, ""},
+		{"off outranks enabled", `"thinking":{"type":"enabled"},"reasoning_effort":"off"`, "off", []string{"off", "max"}, ""},
 		{"no off capability", `"thinking":{"type":"disabled"}`, "", []string{"high"}, "support off or none"},
 		{"unsupported effort", `"thinking":{"type":"enabled"},"reasoning_effort":"medium"`, "", []string{"high"}, "not supported"},
-		{"fixed budget", `"thinking":{"type":"enabled","budget_tokens":1024},"reasoning_effort":"high"`, "", []string{"high"}, "budgets"},
-		{"unknown nested control", `"thinking":{"type":"enabled","extra":"private-value"},"reasoning_effort":"high"`, "", []string{"high"}, "only supports type"},
-		{"wrong thinking type", `"thinking":true,"reasoning_effort":"high"`, "", []string{"high"}, "must be an object"},
-		{"unknown thinking type", `"thinking":{"type":"adaptive"},"reasoning_effort":"high"`, "", []string{"high"}, "enabled or disabled"},
+		{"fixed budget without effort", `"thinking":{"type":"enabled","budget_tokens":1024}`, "", []string{"high"}, "budget_tokens"},
+		{"unknown nested control", `"thinking":{"type":"enabled","extra":"private-value"},"reasoning_effort":"high"`, "high", []string{"high"}, ""},
+		{"wrong thinking without effort", `"thinking":true`, "", []string{"high"}, "must be an object"},
+		{"unknown thinking without effort", `"thinking":{"type":"adaptive"}`, "", []string{"high"}, "enabled or disabled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{"messages":[{"role":"user","content":"hi"}],` + tc.controls + `}`)
@@ -106,7 +106,7 @@ func TestValidateClientRequestFeatures(t *testing.T) {
 		protocol string
 		body     string
 	}{
-		{"unknown field", "openai", `{"messages":[],"logprobs":true}`},
+		{"empty messages despite extensions", "openai", `{"messages":[],"logprobs":true}`},
 		{"n>1", "openai", `{"messages":[],"n":2}`},
 		{"forced tool choice", "openai", `{"messages":[],"tool_choice":{"type":"function","function":{"name":"f"}}}`},
 		{"required tool choice", "openai", `{"messages":[],"tool_choice":"required"}`},

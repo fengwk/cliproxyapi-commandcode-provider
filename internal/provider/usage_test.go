@@ -261,18 +261,17 @@ func TestReasoningEffortPrefersMetadataThenBody(t *testing.T) {
 	}
 }
 
-// The compatibility control must reach the actual builder, not just pass
-// validation; host metadata must not reverse an explicit thinking switch.
+// The selected native effort must reach the builder without being replaced by
+// compatibility switches, including when the host supplies the native effort.
 func TestPrepareCLIChatThinking(t *testing.T) {
 	for _, tc := range []struct {
 		name, controls, metadata, want string
-		reject                         bool
 	}{
-		{"pi max", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "", "max", false},
-		{"disabled", `"thinking":{"type":"disabled"}`, "", "off", false},
-		{"metadata overrides effort", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "high", "high", false},
-		{"metadata conflicts with disabled", `"thinking":{"type":"disabled"}`, "max", "", true},
-		{"metadata conflicts with enabled", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "off", "", true},
+		{"pi max", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "", "max"},
+		{"disabled", `"thinking":{"type":"disabled"}`, "", "off"},
+		{"metadata overrides effort", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "high", "high"},
+		{"metadata outranks disabled", `"thinking":{"type":"disabled"}`, "max", "max"},
+		{"metadata outranks enabled", `"thinking":{"type":"enabled"},"reasoning_effort":"max"`, "off", "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &plan{
@@ -288,13 +287,6 @@ func TestPrepareCLIChatThinking(t *testing.T) {
 			req := rpcExecutorRequest{}
 			req.AuthID, req.Model, req.Metadata = "fake-auth", modelPrefix+p.native, metadata
 			err := p.prepareCLI(req)
-			if tc.reject {
-				var provErr *ProviderError
-				if !errors.As(err, &provErr) || provErr.HTTPStatus != 400 || !strings.Contains(provErr.Message, "conflicts") {
-					t.Fatalf("want local 400 conflict, got %v", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
